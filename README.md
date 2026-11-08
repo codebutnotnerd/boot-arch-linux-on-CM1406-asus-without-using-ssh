@@ -1,4 +1,4 @@
-# Arch Linux ARM on the ASUS Chromebook CM1406 (Skywalker / Tarkin)
+Arch Linux ARM on the ASUS Chromebook CM1406 (Skywalker / Tarkin)
 
 **Target:** ASUS Chromebook CM1406 - board `google,tarkin`, family Skywalker, SoC MediaTek MT8189, eMMC storage.
 **Method:** boot from a USB stick through ChromeOS Developer Mode (Depthcharge, `Ctrl+U`).
