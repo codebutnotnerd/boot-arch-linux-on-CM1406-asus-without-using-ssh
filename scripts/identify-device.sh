@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# identify-device.sh - collect what is needed to support a Chromebook variant (e.g. skywalker / tarkin-futr).
+# identify-device.sh - read-only device identification for the ASUS CM1406 (Skywalker / Tarkin).
 # Run as root in the ChromeOS developer shell (crosh -> shell). Read-only: writes only to $OUT.
 # No HWID, serial number or MAC address is collected.
 set -uo pipefail
-OUT="${OUT:-$HOME/cm14-report}"
+OUT="${OUT:-$HOME/tarkin-report}"
 mkdir -p "$OUT"
 [[ $EUID -eq 0 ]] || { echo "Run as root (sudo)." >&2; exit 1; }
 
@@ -45,5 +45,5 @@ if command -v dtc >/dev/null 2>&1; then
   sed -i -E '/hardware-id|hwid|serial-number|bootargs|kern_guid|mac-address/d' "$OUT/running.dts" 2>/dev/null || true
 fi
 rm -f "$OUT/kern_a.bin"
-echo "Done. Send me: $OUT/report.txt, $OUT/running.dts, $OUT/stock-fit-layout.txt"
+echo "Done. Report files: $OUT/report.txt, $OUT/running.dts, $OUT/stock-fit-layout.txt"
 echo "(stock.fit is also in $OUT; it is large, keep it local unless asked.)"

@@ -1,3 +1,0 @@
-# Integrated webcam (UVC 1080p FHD): anti-flicker setting set to 50 Hz for France / Europe (mains 50 Hz).
-# uvcvideo restores the value over autosuspend and system sleep. Works under both kernels.
-ACTION=="add", SUBSYSTEM=="video4linux", ENV{ID_V4L_CAPABILITIES}==":capture:", RUN+="/usr/bin/v4l2-ctl -d $devnode -c power_line_frequency=1"

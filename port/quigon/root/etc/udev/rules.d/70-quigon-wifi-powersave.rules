@@ -1,2 +1,0 @@
-# Wi-Fi power save follows the power source (on battery: on; on a charger or a powered USB-C dock/monitor: off)
-SUBSYSTEM=="power_supply", ACTION=="add|change", RUN+="/usr/local/libexec/quigon/wifi-powersave"

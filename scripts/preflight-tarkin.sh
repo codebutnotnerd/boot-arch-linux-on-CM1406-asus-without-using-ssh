@@ -1,67 +1,83 @@
 #!/bin/bash
+# preflight-tarkin.sh - read-only checks before running install/install-usb.sh.
+# Run as root in the ChromeOS developer shell. Writes only to /var/tmp/pf. Report: /var/tmp/pf/report.txt
+# Any line containing MISSING, ABSENT or FAILED must be fixed before installing.
 set -u
+[[ $EUID -eq 0 ]] || { echo "Run as root (sudo)." >&2; exit 1; }
 O=/var/tmp/pf
-rm -rf "$O"
-mkdir -p "$O"
+rm -rf "$O"; mkdir -p "$O"
 KB=/usr/share/vboot/devkeys/kernel.keyblock
 SK=/usr/share/vboot/devkeys/kernel_data_key.vbprivk
+CMDLINE='console= loglevel=7 init=/sbin/init root=PARTUUID=%U/PARTNROFF=1 rootwait rw noinitrd net.ifnames=0 lsm=capability,landlock,yama,bpf cpuidle.governor=teo irqchip.gicv3_pseudo_nmi=1'
 {
-echo "## outils"
+echo "## board"
+compat="$(tr '\0' ' ' < /proc/device-tree/compatible 2>/dev/null)"
+echo "compatible: ${compat:-unreadable}"
+if [[ "$compat" == *google,tarkin* ]]; then echo "board: OK (google,tarkin)"; else echo "board: FAILED (not a google,tarkin board)"; fi
+echo "kernel: $(uname -r)"
+echo "mainfw_type: $(crossystem mainfw_type 2>&1)"
+
+echo "## tools"
 for c in cgpt futility bsdtar mkfs.ext4 blockdev blkid dd findmnt mountpoint chroot mount umount md5sum curl crossystem rootdev lsblk; do
-  printf '%s: ' "$c"
-  command -v "$c" || echo MANQUANT
+  printf '%s: ' "$c"; command -v "$c" || echo MISSING
 done
 
-echo "## cles de signature"
-ls -l "$KB" "$SK" 2>&1
+echo "## signing keys"
+[[ -f "$KB" ]] && echo "keyblock: OK" || echo "keyblock: MISSING"
+[[ -f "$SK" ]] && echo "private key: OK" || echo "private key: MISSING"
 
-echo "## flags firmware (lecture seule)"
+echo "## firmware flags (read-only)"
 echo "dev_boot_usb=$(crossystem dev_boot_usb 2>&1) dev_boot_signed_only=$(crossystem dev_boot_signed_only 2>&1)"
 
-echo "## slot et partition noyau"
-disk="$(rootdev -s -d)"
-root="$(rootdev -s)"
-num="${root##*[!0-9]}"
+echo "## active slot and kernel partition"
+disk="$(rootdev -s -d)"; root="$(rootdev -s)"; num="${root##*[!0-9]}"
 echo "disk=$disk root=$root"
 k=""
-case "$num" in
-  3|5) k=$((num - 1));;
-  *) echo "ERREUR: racine inattendue ($root)";;
-esac
+case "$num" in 3|5) k=$((num - 1));; *) echo "root partition: FAILED (unexpected $root, expected p3 or p5)";; esac
 if [[ "$disk" =~ [0-9]$ ]]; then pk="${disk}p${k}"; else pk="${disk}${k}"; fi
-echo "partition noyau: $pk"
-if [[ -b "$pk" ]]; then echo "peripherique bloc: OK"; else echo "peripherique bloc: ABSENT"; fi
+echo "kernel partition: $pk"
+[[ -b "$pk" ]] && echo "block device: OK" || echo "block device: ABSENT"
 
-echo "## espace et options de montage"
+echo "## modules and firmware"
+[[ -d "/lib/modules/$(uname -r)" ]] && echo "modules: OK" || echo "modules: MISSING (/lib/modules/$(uname -r))"
+[[ -d /lib/firmware ]] && echo "firmware dir: OK" || echo "firmware dir: MISSING"
+for b in WIFI_MT7925_PATCH_MCU_1_1_hdr.bin WIFI_RAM_CODE_MT7925_1_1.bin BT_RAM_CODE_MT7925_1_1_hdr.bin; do
+  [[ -s /lib/firmware/mediatek/mt7925/$b ]] && echo "mt7925/$b: OK" || echo "mt7925/$b: ABSENT (the installer will try to download it)"
+done
+
+echo "## space and mount options"
 df -h /var/tmp /usr/local 2>&1
 findmnt -no TARGET,OPTIONS -T /usr/local 2>&1
 
-echo "## test de montage (tmpfs en memoire, aucun disque)"
+echo "## mount test (tmpfs in memory, no disk)"
 mkdir -p /usr/local/pf_mnt
-if mount -t tmpfs tmpfs /usr/local/pf_mnt; then echo "mount: OK"; umount /usr/local/pf_mnt; else echo "mount: ECHEC"; fi
+if mount -t tmpfs tmpfs /usr/local/pf_mnt; then echo "mount: OK"; umount /usr/local/pf_mnt; else echo "mount: FAILED"; fi
 rmdir /usr/local/pf_mnt 2>/dev/null
 
-echo "## repack a blanc du noyau (ecrit seulement dans $O)"
+echo "## dry-run kernel repack (writes only to $O)"
 if [[ -b "$pk" && -f "$KB" && -f "$SK" ]]; then
   dd if="$pk" of="$O/stock.bin" bs=1M status=none
-  echo "lu: $(stat -c %s "$O/stock.bin") octets"
-  printf '%s\n' "console= loglevel=7 init=/sbin/init root=PARTUUID=%U/PARTNROFF=1 rootwait rw noinitrd net.ifnames=0 lsm=capability,landlock,yama,bpf cpuidle.governor=teo irqchip.gicv3_pseudo_nmi=1" > "$O/cmdline"
+  echo "read: $(stat -c %s "$O/stock.bin") bytes"
+  printf '%s\n' "$CMDLINE" > "$O/cmdline"
   futility vbutil_kernel --repack "$O/test-kernel.bin" --oldblob "$O/stock.bin" \
     --keyblock "$KB" --signprivate "$SK" --config "$O/cmdline" --flags 0x1
-  echo "repack: exit=$?"
-  ls -l "$O/test-kernel.bin" 2>&1
+  rc=$?
+  [[ $rc -eq 0 ]] && echo "repack: OK" || echo "repack: FAILED (exit $rc)"
   futility vbutil_kernel --verify "$O/test-kernel.bin" 2>&1 | sed -n '/Flags/p;/Body verification/p;/^Config:/,$p'
 else
-  echo "repack: IGNORE (partition ou cles manquantes)"
+  echo "repack: SKIPPED (partition or keys missing)"
 fi
 
-echo "## reseau (lecture seule)"
-curl -sI --max-time 20 https://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz.md5 2>&1 | head -1
-curl -sI --max-time 20 https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/mediatek/mt7925/WIFI_RAM_CODE_MT7925_1_1.bin 2>&1 | head -1
+echo "## network"
+curl -sI --max-time 20 https://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz.md5 2>&1 | head -1 | grep -q ' 200' \
+  && echo "archlinuxarm.org: OK" || echo "archlinuxarm.org: FAILED (no network?)"
 
-echo "## peripheriques (branche ta cle USB avant)"
+echo "## block devices (plug the USB stick in first)"
 lsblk -o NAME,SIZE,RM,TRAN,TYPE,MODEL 2>&1 | grep -v -E '^(loop|zram)|[ `|]-?[0-9a-f]{20,}'
 } 2>&1 | tee "$O/report.txt"
 chmod -R a+r "$O"
 echo
-echo "Rapport: $O/report.txt"
+echo "Report: $O/report.txt"
+if grep -q -E 'MISSING|ABSENT|FAILED' "$O/report.txt"; then
+  echo "Lines with MISSING/ABSENT/FAILED need attention (an ABSENT mt7925 firmware line alone is fine)."
+fi

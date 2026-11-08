@@ -1,4 +1,0 @@
-# Battery management and UPower refresh rule for ASUS Chromebook CM14 (CM1406CM4A)
-# Supports smart battery (sbs-battery), cros_ec_battery, and AC charging changes
-SUBSYSTEM=="power_supply", ATTR{type}=="Battery", ATTR{present}=="1", TEST=="current_now", RUN+="/usr/bin/udevadm trigger --subsystem-match=power_supply"
-

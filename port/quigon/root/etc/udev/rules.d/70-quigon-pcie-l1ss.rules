@@ -1,2 +1,0 @@
-# Built-in Wi-Fi / Wi-Fi 7 PCIe link: L1.1 on, L1.2 off across suspend (see /usr/local/libexec/quigon/pcie-l1ss)
-ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x14c3", ATTR{device}=="0x7925|0x7927|0x0616|0x7961|0x7922", RUN+="/usr/local/libexec/quigon/pcie-l1ss /sys%p"

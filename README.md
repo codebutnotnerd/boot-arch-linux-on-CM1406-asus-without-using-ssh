@@ -1,345 +1,163 @@
-# Arch Linux ARM on ASUS Chromebook CM1406
+# Arch Linux ARM on the ASUS Chromebook CM1406 (Skywalker / Tarkin)
 
-**Target:** ASUS Chromebook CM1406 — Google Tarkin / MediaTek MT8189  
-**Boot method:** USB (ChromeOS Developer Mode)  
-**Installation type:** External storage only
+**Target:** ASUS Chromebook CM1406 - board `google,tarkin`, family Skywalker, SoC MediaTek MT8189, eMMC storage.
+**Method:** boot from a USB stick through ChromeOS Developer Mode (Depthcharge, `Ctrl+U`).
+**Internal storage:** never touched. ChromeOS stays installed.
 
-This project provides an experimental Arch Linux ARM installation for the ASUS CM1406 Chromebook. The system is installed on a USB drive and booted through ChromeOS's Depthcharge bootloader.
+The installer takes the **stock ChromeOS kernel of your own machine** (which already contains the right Tarkin
+device tree), re-signs it with the developer keys, and boots an Arch Linux ARM userland from the stick. Nothing is
+built from source and no other Chromebook variant is supported or referenced.
 
-The internal eMMC is not repartitioned or formatted. ChromeOS remains installed.
+> **Experimental.** A boot on a physical CM1406 has not been confirmed yet. The same method booted a different
+> MT8189 variant (Obiwan) on the first try, and the Tarkin-specific steps were checked on a real device up to the
+> kernel repack (see [`notes/tarkin-findings.md`](notes/tarkin-findings.md)). Everything after that is untested.
 
-> **Experimental software.** The installation process has been tested in a simulated environment, but a successful boot on the physical CM1406 has not yet been established. Hardware compatibility must not be assumed.
+## What you get
 
-## Hardware and test status
+A base Arch Linux ARM system that boots on the stock kernel and is reachable **over SSH only**:
 
-The target device identifies itself as:
+- Wi-Fi (MediaTek MT7925, WPA2-PSK) via `wpa_supplicant` + `systemd-networkd`, DHCP on `wlan0`
+- SSH by public key only (users `alarm` and `root`), hostname `asus-cm1406`
+- Persistent journal, no suspend (lid/idle ignored), reboot 10 s after a kernel panic
+- A plain-text diagnostics report at `/var/log/tarkin-boot.log`, refreshed 90 s after boot and every 10 minutes
 
-| Property | Value |
-|---|---|
-| Board | `google,tarkin` |
-| Platform | Skywalker |
-| SoC | MediaTek MT8189 |
-| Architecture | AArch64 |
-| Storage | eMMC |
-| ChromeOS kernel | 6.6.x |
-| Active kernel slot | KERN-B (`p4`) |
+**Not included / untested:** screen output (the stock kernel has no console: the screen stays black), desktop
+environment, GPU, audio (the card is `mt8189_rt5650`), touchpad tuning, Bluetooth, suspend, WPA3-only /
+enterprise / hidden networks.
 
-Machine identification and preflight results are documented in [`notes/tarkin-findings.md`](notes/tarkin-findings.md).
+## Requirements
 
-### Test coverage
-
-| Component | Status |
-|---|---|
-| Device identification | Verified on physical hardware |
-| Stock kernel extraction and repacking | Preflight checks passed |
-| Kernel signing with `futility` | Preflight checks passed |
-| Full installer execution | Simulated successfully |
-| USB partitioning | Simulated |
-| Root filesystem extraction | Simulated |
-| SSH configuration | Simulated |
-| Wi-Fi configuration | Simulated, with and without Python |
-| File permissions | Audited and corrected |
-| Actual USB boot | Not tested |
-| Real ARM chroot | Not tested |
-| MT7925 Wi-Fi | Not tested |
-| Display and GPU | Not tested |
-| Audio and touchpad | Not tested |
-
-A successful simulated installation does not establish that the Chromebook will boot the resulting USB drive.
-
-## Before installation
-
-### Requirements
-
-- ASUS CM1406 Chromebook.
-- ChromeOS Developer Mode enabled.
-- A separate USB drive. All existing data on it will be erased.
-- A second device capable of connecting over SSH.
-- An Ed25519 SSH key pair.
-- Access to the Chromebook's VT2 shell.
-- A working Wi-Fi network using WPA2-PSK.
-- The project repository and installation dependencies.
-
-### Important limitations
-
-**Display**
-
-The stock ChromeOS kernel does not provide the console environment expected by this installation. The initial boot may therefore produce a black screen. Remote access over SSH is required.
-
-**Desktop environment**
-
-The USB image initially provides a base Arch Linux ARM system with SSH. Omarchy and Hyprland are not guaranteed to be installed. The upstream Omarchy provisioning process is not executed during installation.
-
-**Wi-Fi**
-
-The initial configuration targets WPA2-PSK networks. WPA3-only, enterprise and hidden networks are not covered by the current setup. A WPA2 hotspot can be used for initial testing.
-
-**Hardware configuration**
-
-Some files under `port/quigon/` originate from the related Obiwan hardware variant. They are not all validated for Tarkin.
-
-In particular:
-
-- The audio configuration references RT5682S/RT1019P, whereas the target has been identified with an MT8189 RT5650 configuration.
-- The palm-filter configuration expects an Elan touchpad, while the detected device is `04F3:31C6`.
-- Other board-specific power, input and peripheral configurations may require changes.
-
-Do not assume audio, touchpad, camera, GPU or power-management support.
+- ASUS CM1406 in **ChromeOS Developer Mode**.
+- A USB stick, 8 GB or more. **Everything on it is erased.**
+- A second device on the same network to SSH from, and an Ed25519 key pair.
+- A WPA2-PSK Wi-Fi network (a phone hotspot is ideal for the first test).
+- This repository on the Chromebook.
 
 ## Installation
 
-### 1. Prepare an SSH key
-
-Generate an Ed25519 key pair on the second device:
+### 1. Create an SSH key (on the second device)
 
 ```sh
 ssh-keygen -t ed25519 -C "cm1406-arch"
-```
-
-Display the public key:
-
-```sh
 cat ~/.ssh/id_ed25519.pub
 ```
 
-Only the public key is required by the installer. Keep the private key on the SSH client device.
+Only the public key goes to the Chromebook.
 
-### 2. Copy the public key to ChromeOS
+### 2. Open a shell on the Chromebook
 
-Open the ChromeOS shell:
+Press `Ctrl+Alt+T`, type `shell`. (Or use VT2 with `Ctrl+Alt+Refresh`.) All commands below run there.
 
-1. Press `Ctrl + Alt + T`.
-2. Enter `shell`.
-3. Switch to VT2 using `Ctrl + Alt + Refresh`.
-
-Create the public-key file:
+Save your public key:
 
 ```sh
-cat > /var/tmp/key.pub <<'EOF'
-ssh-ed25519 AAAA... replace-with-your-public-key
-EOF
-
-chmod 600 /var/tmp/key.pub
+cat > /var/tmp/key.pub <<'KEY'
+ssh-ed25519 AAAA... paste-your-whole-public-key-here
+KEY
 ```
 
-Replace the example with the complete public key.
-
-### 3. Extract the project
-
-Extract the downloaded project archive:
+### 3. Unpack this repository
 
 ```sh
 cd /var/tmp
-bsdtar -xf ~/MyFiles/Downloads/asus-cm14-tarkin-ready.zip
+bsdtar -xf ~/MyFiles/Downloads/boot-arch-linux-on-CM1406-asus-main.zip
+cd /var/tmp/boot-arch-linux-on-CM1406-asus-main
 ```
 
-Enter the repository:
+(Adjust the file name to what you downloaded.)
 
-```sh
-cd /var/tmp/asus-cm14-chromebook-omarchy
-```
-
-### 4. Run the preflight checks
-
-The preflight script performs read-only checks before installation:
+### 4. Preflight (read-only)
 
 ```sh
 sudo bash scripts/preflight-tarkin.sh
 ```
 
-Review the report:
+The report is `/var/tmp/pf/report.txt`. It must say `board: OK (google,tarkin)` and `repack: OK`. Do not continue
+if any line contains `MISSING`, `ABSENT` or `FAILED` - except `ABSENT` on an `mt7925/...` firmware line, which the
+installer handles. Clean up afterwards with `sudo rm -rf /var/tmp/pf`.
+
+### 5. Find the USB stick
+
+Plug it in:
 
 ```sh
-cat /var/tmp/pf/report.txt
+lsblk -o NAME,SIZE,RM,TRAN,MODEL
 ```
 
-Do not proceed if the report contains `MANQUANT`, `ABSENT` or `ECHEC`. Resolve the reported problems first.
+The stick has `RM=1` and `TRAN=usb` (for example `/dev/sda`). **The internal eMMC is `/dev/mmcblk0` - never use
+it.** Use the whole device, not a partition.
 
-### 5. Download the Arch Linux ARM root filesystem
-
-Download the AArch64 root filesystem:
-
-```sh
-cd /var/tmp
-
-curl -fLO https://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
-
-curl -fLO https://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz.md5
-```
-
-Verify the archive:
+### 6. Install
 
 ```sh
-md5sum -c ArchLinuxARM-aarch64-latest.tar.gz.md5
-```
-
-The checksum must pass before installation.
-
-### 6. Identify the USB drive
-
-Connect the USB drive and list block devices:
-
-```sh
-lsblk -o NAME,SIZE,RM,TRAN,FSTYPE,MOUNTPOINT
-```
-
-Identify the USB device by its size and transport:
-
-- `RM=1`
-- `TRAN=usb`
-
-For example, the device might be `/dev/sda`.
-
-**The internal eMMC is `/dev/mmcblk0`. Never select it.**
-
-Use the whole USB device, not one of its partitions.
-
-### 7. Install Arch Linux ARM
-
-Run the installer from VT2.
-
-Replace `/dev/sdX` with the actual USB device and `NomWifi` with the WPA2 network name:
-
-```sh
-cd /var/tmp/asus-cm14-chromebook-omarchy
-
+cd /var/tmp/boot-arch-linux-on-CM1406-asus-main
 sudo env CONFIRM_ERASE=/dev/sdX \
   bash install/install-usb.sh \
-  --alarm /var/tmp/ArchLinuxARM-aarch64-latest.tar.gz \
-  --wifi-ssid "NomWifi" \
   --pubkey "$(cat /var/tmp/key.pub)" \
   /dev/sdX
 ```
 
-The Wi-Fi password is requested interactively and is not supplied as a command-line argument.
+Replace `/dev/sdX` (twice) with your stick. By default the installer downloads the Arch Linux ARM root filesystem
+over HTTPS, verifies its MD5 and uses the Wi-Fi network saved in ChromeOS. To choose the network yourself add
+`--wifi-ssid "NetworkName"` (the passphrase is then prompted, never passed on the command line). Options:
 
-The installer:
-
-1. Checks the target device.
-2. Verifies the Arch Linux ARM archive.
-3. Prepares the ChromeOS-compatible kernel image.
-4. Creates the USB partition table.
-5. Formats the root partition as ext4.
-6. Extracts Arch Linux ARM.
-7. Installs system configuration and SSH access.
-8. Configures networking and first-boot services.
-9. Writes the signed kernel to the USB drive.
-
-**Warning:** All data on the selected USB device will be destroyed. The installer requires an exact confirmation through `CONFIRM_ERASE`.
-
-### 8. Boot from USB
-
-Leave the USB drive connected.
-
-1. Shut down the Chromebook.
-2. Power it on.
-3. At the `OS verification is OFF` screen, press `Ctrl + U`.
-4. Wait for the system to initialize.
-
-The screen may remain black. This is expected by the current installation design; it does not confirm that the system has booted successfully.
-
-### 9. Connect over SSH
-
-After allowing time for startup, locate the Chromebook's IP address through the router's connected-device list.
-
-The configured hostname is:
-
-```text
-asus-cm14
-```
-
-Connect from the second device:
-
-```sh
-ssh -i ~/.ssh/id_ed25519 alarm@<IP_ADDRESS>
-```
-
-Replace `<IP_ADDRESS>` with the address assigned by the router.
-
-If the device does not appear after 2–3 minutes, power it off using the side button. Remove the USB drive and restart ChromeOS.
-
-## Recovery and rollback
-
-The internal eMMC is not repartitioned or formatted by this USB installation method.
-
-Without the USB drive, ChromeOS remains the normal boot environment. On the Developer Mode screen, `Ctrl + D` starts ChromeOS.
-
-The installer also modifies ChromeOS boot configuration flags:
-
-```sh
-sudo crossystem dev_boot_usb=1 dev_boot_signed_only=0
-```
-
-To restore the original flag values:
-
-```sh
-sudo crossystem dev_boot_usb=0 dev_boot_signed_only=1
-```
-
-The preflight working directory can be removed:
-
-```sh
-sudo rm -rf /var/tmp/pf
-```
-
-The disabled internal-storage scripts are retained in the repository with `.DISABLED` extensions:
-
-- `install/flash-internal.sh.DISABLED`
-- `install/restore-chromeos.sh.DISABLED`
-
-They are not part of the USB installation procedure.
-
-## Repository changes
-
-The current Tarkin preparation includes the following changes:
-
-| Path | Description |
+| Option / variable | Purpose |
 |---|---|
-| `install/install-usb.sh` | USB installer with active kernel-slot detection, stock-kernel repacking and SSH configuration |
-| `scripts/preflight-tarkin.sh` | Read-only hardware and installation checks |
-| `scripts/identify-device.sh` | Device and active-slot identification with sensitive identifiers removed |
-| `scripts/build-usb.sh` | Alternative USB build path; currently depends on a LAN bridge |
-| `port/quigon/root/` | Reused system configuration, with Tarkin compatibility limitations |
-| `port/quigon/user/` | Hyprland user configuration |
-| `notes/tarkin-findings.md` | Hardware identification and device-tree findings |
-| `notes/README-obiwan-original.md` | Original Obiwan documentation |
+| `--alarm <file\|https-url>` | Use a tarball you already downloaded (its `.md5` file must sit beside it) |
+| `--wifi-ssid <name>` | Wi-Fi network instead of the ChromeOS-saved one |
+| `WIFI_COUNTRY=FR` | Set the Wi-Fi regulatory domain |
+| `ALLOW_NO_WIFI=1` | Install without Wi-Fi (you then need another way in) |
+| `FORCE_BOARD=1` | Skip the `google,tarkin` check (not recommended) |
 
-The installer is the recommended entry point for this USB installation path. `scripts/build-usb.sh` is an alternative workflow and has additional dependencies.
+What the installer does, in order: checks the board and the target (removable USB only, never eMMC, never the
+running ChromeOS disk) -> downloads and verifies the rootfs -> repacks and verifies the signed kernel -> sets
+`dev_boot_usb=1 dev_boot_signed_only=0` -> partitions the stick (p1 kernel, p2 root) -> extracts the rootfs ->
+copies the ChromeOS kernel modules and firmware -> configures SSH, Wi-Fi and services -> installs
+`wpa_supplicant`, `iw` and `pciutils` in a chroot (`pacman -Syu`, needs the Chromebook to be online) -> writes the
+kernel to p1.
 
-## Mainline kernel and device-tree work
+### 7. Boot
 
-A dedicated Tarkin mainline device tree is not currently provided as `mt8189-tarkin.dts`.
+1. Leave the stick plugged in, power the Chromebook off, then on.
+2. At the "OS verification is OFF" screen press **`Ctrl+U`**.
+3. **Expect a black screen.** Wait 1-3 minutes, find the new device (`asus-cm1406`) in your router, then:
 
-A proper port would require transferring and adapting the relevant nodes from the ChromeOS 6.6 device tree to the mainline kernel. The required work and currently identified nodes are described in:
+```sh
+ssh -i ~/.ssh/id_ed25519 alarm@<ip-address>
+```
 
-- [`notes/tarkin-findings.md`](notes/tarkin-findings.md)
-- [`port/quigon/patches/`](port/quigon/patches/)
+(`root@<ip-address>` works too, with the same key.)
 
-The existence of MT8189-related patches does not establish complete Tarkin hardware support.
+## If it does not work
 
-## Security considerations
+- Hold the power button to turn off, unplug the stick and press `Ctrl+D` at the developer screen: ChromeOS boots
+  as before.
+- Read what happened: boot ChromeOS, plug the stick in, mount its second partition
+  (`sudo mkdir /mnt/s && sudo mount /dev/sdX2 /mnt/s`) and read `/mnt/s/var/log/tarkin-boot.log` (written only if
+  the system got far enough to start). A kernel panic is also kept in `/sys/fs/pstore` on ChromeOS after the
+  reboot.
+- Wi-Fi is the most likely failure point (MT7925, untested on this board). Retry with a plain WPA2 hotspot.
+- To undo the firmware flags: `sudo crossystem dev_boot_usb=0 dev_boot_signed_only=1`.
 
-- Use a separate USB drive for installation.
-- Never target `/dev/mmcblk0`.
-- Do not publish raw hardware-identification output, partition UUIDs, serial numbers, MAC addresses or Wi-Fi credentials.
-- Keep the SSH private key on the client device.
-- The installer refuses non-removable and non-USB targets, internal eMMC devices and installations without explicit erase confirmation.
-- Verify the root filesystem archive before writing the USB drive.
+## Repository layout
 
-## Contributing and issue reports
+| Path | Purpose |
+|---|---|
+| `install/install-usb.sh` | The installer |
+| `scripts/preflight-tarkin.sh` | Read-only checks before installing |
+| `scripts/identify-device.sh` | Optional: collects a redacted hardware report (no HWID, serial number or MAC) |
+| `rootfs/` | Files copied onto the stick: SSH policy, no-suspend, panic reboot, boot diagnostics |
+| `notes/tarkin-findings.md` | What is verified on the device and what is not |
 
-Useful bug reports should include:
+## Security
 
-- Chromebook board and SoC.
-- ChromeOS kernel version.
-- Preflight report, with identifying information removed.
-- USB device type and capacity.
-- Whether the device displayed anything during boot.
-- SSH connectivity results.
-- Relevant system logs, once access is available.
+- Use a spare USB stick and never target `/dev/mmcblk0`.
+- sshd accepts keys only; keep the private key on your client device.
+- Do not publish HWIDs, serial numbers, MAC addresses, partition UUIDs or Wi-Fi credentials in bug reports.
+- Developer Mode and `dev_boot_signed_only=0` weaken the Chromebook's boot verification; restore the flags (above)
+  when you no longer need USB boot.
 
-Do not include private keys, Wi-Fi passwords, serial numbers, MAC addresses, HWIDs or partition UUIDs.
+## Credits and license
 
----
-
-**Project status:** Experimental. USB installation logic has been exercised in a simulated environment. Physical boot and peripheral support on the ASUS CM1406 Tarkin remain unverified.
+Derived from the Omarchy/Arch Linux ARM Chromebook CM14 project by zoan37 and contributors, reduced here to the
+Tarkin USB boot path. MIT license, see [`LICENSE`](LICENSE).
