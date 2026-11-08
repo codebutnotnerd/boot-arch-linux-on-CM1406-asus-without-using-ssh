@@ -39,6 +39,8 @@ cleanup() {
 trap cleanup EXIT
 
 die() { echo "[-] $*" >&2; exit 1; }
+# Never hang forever on a slow or filtered server: connect timeout, retries, and abort when the speed stalls.
+CURL_OPTS=(--fail --location --show-error --connect-timeout 20 --retry 3 --retry-delay 3 --speed-time 45 --speed-limit 2000)
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -58,6 +60,7 @@ Environment:
   CONFIRM_ERASE=/dev/sdX  required, must equal the target device
   ALLOW_NO_WIFI=1         allow an install without any Wi-Fi configuration
   WIFI_COUNTRY=FR         optional two-letter regulatory domain written to wpa_supplicant
+  ALLOW_NO_PKGS=1         skip the network check and the Wi-Fi tools (the stick then cannot be reached over SSH)
   FORCE_BOARD=1           skip the "this is a google,tarkin board" check
 USAGE
       exit 0 ;;
@@ -124,8 +127,10 @@ ARCHIVE="$ALARM_SOURCE"
 if [[ "$ALARM_SOURCE" =~ ^https:// ]]; then
   ARCHIVE_TMP="$(mktemp -d "$WORK/alarm-dl.XXXXXX")"
   ARCHIVE="$ARCHIVE_TMP/ArchLinuxARM-aarch64-latest.tar.gz"
-  curl --fail --location --show-error "$ALARM_SOURCE" -o "$ARCHIVE"
-  curl --fail --location --show-error "${ALARM_SOURCE}.md5" -o "$ARCHIVE.md5"
+  echo "== Downloading the rootfs (stalls are detected; if this fails, download it in the ChromeOS browser and use --alarm)..."
+  curl "${CURL_OPTS[@]}" "$ALARM_SOURCE" -o "$ARCHIVE" \
+    || die "Rootfs download failed. Download ArchLinuxARM-aarch64-latest.tar.gz and its .md5 with the browser into /var/tmp, then re-run with --alarm."
+  curl "${CURL_OPTS[@]}" "${ALARM_SOURCE}.md5" -o "$ARCHIVE.md5" || die "Checksum download failed."
 elif [[ "$ALARM_SOURCE" =~ ^http:// ]]; then
   die "Rootfs download URLs must use HTTPS."
 elif [[ ! -f "$ARCHIVE" ]]; then
@@ -160,6 +165,14 @@ if [[ -n "$WIFI_SSID" ]]; then
   [[ "$WIFI_SSID" != *$'\n'* && "$WIFI_SSID" != *$'\r'* ]] || die "SSIDs containing line breaks are not supported."
   (( ${#WIFI_PASS} >= 8 && ${#WIFI_PASS} <= 63 )) || die "Only WPA2-PSK passphrases (8-63 characters) are supported."
   [[ -z "${WIFI_COUNTRY:-}" || "$WIFI_COUNTRY" =~ ^[A-Z]{2}$ ]] || die "WIFI_COUNTRY must be two capital letters, e.g. FR."
+fi
+
+# The Wi-Fi tools are installed from the Arch Linux ARM mirror inside a chroot: check that network works NOW,
+# before the stick is erased, so a missing connection does not produce a stick that boots but cannot be reached.
+if [[ "${ALLOW_NO_PKGS:-0}" != 1 ]]; then
+  echo "== Checking network access to the Arch Linux ARM package mirror..."
+  curl -sSI --connect-timeout 15 --max-time 30 http://mirror.archlinuxarm.org/aarch64/core/core.db >/dev/null 2>&1 \
+    || die "Cannot reach mirror.archlinuxarm.org from this shell. Check that ChromeOS has internet (Wi-Fi connected), try another network (a phone hotspot), or set ALLOW_NO_PKGS=1 to install without Wi-Fi tools (the stick then cannot be reached over SSH)."
 fi
 
 echo "Target USB device : $DEV"
@@ -246,7 +259,7 @@ FW_URL="https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.
 for blob in WIFI_MT7925_PATCH_MCU_1_1_hdr.bin WIFI_RAM_CODE_MT7925_1_1.bin BT_RAM_CODE_MT7925_1_1_hdr.bin; do
   if [[ ! -s "$FW_DIR/$blob" ]]; then
     echo "   [!] $blob missing from ChromeOS, downloading..."
-    curl --fail --location --show-error --max-time 60 "$FW_URL/$blob" -o "$FW_DIR/$blob" \
+    curl "${CURL_OPTS[@]}" --max-time 90 "$FW_URL/$blob" -o "$FW_DIR/$blob" \
       || { rm -f "$FW_DIR/$blob"; echo "   [!] $blob unavailable: Wi-Fi may not come up." >&2; }
   fi
 done
@@ -296,8 +309,11 @@ if [[ -e "$MNT/etc/resolv.conf" || -L "$MNT/etc/resolv.conf" ]]; then
   mv "$MNT/etc/resolv.conf" "$MNT/etc/resolv.conf.orig"; resolv_saved=1
 fi
 cp /etc/resolv.conf "$MNT/etc/resolv.conf" || true
+printf 'nameserver 1.1.1.1\nnameserver 9.9.9.9\n' >> "$MNT/etc/resolv.conf"   # fallback if ChromeOS uses a local-only resolver
+PKG_OK=1
 chroot "$MNT" /bin/bash -c 'pacman-key --init >/dev/null 2>&1 && pacman-key --populate archlinuxarm >/dev/null 2>&1 && pacman -Syu --noconfirm --needed wpa_supplicant iw pciutils' \
-  || echo "[!] Package install failed (no network from ChromeOS?). Wi-Fi will need manual setup." >&2
+  || { PKG_OK=0; echo "[!] Package install failed (no network from this shell?)." >&2; }
+[[ -x "$MNT/usr/bin/wpa_supplicant" ]] || PKG_OK=0
 
 # Replace the cleartext passphrase by a hashed PSK (ChromeOS has no python3, wpa_passphrase comes from the chroot).
 if [[ -n "$WIFI_SSID" && -x "$MNT/usr/bin/wpa_passphrase" ]]; then
@@ -342,6 +358,26 @@ echo "== Writing the signed kernel to $part1..."
 dd if="$KERNEL_TMP_DIR/kernel.bin" of="$part1" bs=1M conv=fsync status=progress
 sync
 
+# Read the kernel back from the stick and verify it, so a bad write is caught here and not at boot.
+echo "== Verifying what was written to $part1..."
+ksize="$(stat -c %s "$KERNEL_TMP_DIR/kernel.bin")"
+dd if="$part1" of="$KERNEL_TMP_DIR/readback.bin" bs=1M count=$(( (ksize + 1048575) / 1048576 )) status=none
+head -c "$ksize" "$KERNEL_TMP_DIR/readback.bin" > "$KERNEL_TMP_DIR/readback.trim"
+[[ "$(md5sum < "$KERNEL_TMP_DIR/readback.trim" | awk '{print $1}')" == "$(md5sum < "$KERNEL_TMP_DIR/kernel.bin" | awk '{print $1}')" ]] \
+  || die "The kernel read back from $part1 differs from what was written. Try another USB port or stick."
+futility vbutil_kernel --verify "$KERNEL_TMP_DIR/readback.trim" >/dev/null || die "The kernel on $part1 does not verify."
+cgpt show "$DEV"
+echo "   Kernel on $part1: written and verified."
+
+if [[ "${PKG_OK:-1}" != 1 && "${ALLOW_NO_PKGS:-0}" != 1 ]]; then
+  cat <<'WARN'
+##########################################################
+[!] WARNING: wpa_supplicant could NOT be installed on the stick.
+    It will probably boot but will not connect to Wi-Fi, so you will not be able to SSH in.
+    Fix the network (see README, "Troubleshooting") and run the installer again.
+##########################################################
+WARN
+fi
 cat <<EOF
 ==========================================================
 [+] USB written: $DEV
@@ -353,6 +389,6 @@ Boot it:
     in your router and connect:   ssh -i <private-key> alarm@<ip>   (or root@<ip>)
 
 If it never appears on the network: power off, unplug the stick, press Ctrl+D to boot ChromeOS.
-To read what happened, mount the stick's partition 2 in ChromeOS and look at /var/log/tarkin-boot.log.
+To see what happened: run  sudo bash scripts/check-usb.sh  in ChromeOS (see README, "Troubleshooting").
 ==========================================================
 EOF
