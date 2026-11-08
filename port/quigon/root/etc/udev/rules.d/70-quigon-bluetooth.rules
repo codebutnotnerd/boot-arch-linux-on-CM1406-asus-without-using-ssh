@@ -1,0 +1,4 @@
+# MediaTek Bluetooth 5.4 auto-enable and power management
+ACTION=="add", SUBSYSTEM=="bluetooth", KERNEL=="hci[0-9]*", RUN+="/usr/bin/hciconfig %k up"
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="0e8d", ATTR{idProduct}=="7925|7961|0616", ATTR{power/control}="auto"
+

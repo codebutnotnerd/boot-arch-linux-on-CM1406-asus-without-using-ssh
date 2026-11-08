@@ -1,0 +1,39 @@
+#!/bin/bash
+# Omarchy session (uwsm-managed Hyprland, same Exec as Omarchy's omarchy.desktop) directly on mediatek-drm.
+# Started by quigon-desktop@<user>.service.
+#
+# GPU mode (/etc/quigon/gpu.env present): Hyprland renders on the Mali through ChromeOS's libmali (its unit gets
+# gpu.env via a drop-in, which also keeps Hyprland's own children such as the Omarchy bar on llvmpipe). Apps launched
+# through uwsm get Mesa OpenGL on the Mali via Zink by default; Qt Quick uses its software renderer (Qt Quick on Zink
+# crashed Quickshell: Zink can't export images on this driver); Mesa GBM stays software so Chromium/Electron fall back
+# cleanly. Chrome, Electron apps and Ghostty have their own quigon-* wrappers; GTK 4 uses the Mali Vulkan driver.
+# quigon-nozink <app> runs an app on llvmpipe. Software mode: everything on llvmpipe. On the mainline kernel
+# (release *-quigon*): stock Mesa on Panfrost, whatever gpu.env says.
+set -u
+cd "$HOME"
+export XDG_RUNTIME_DIR=/run/user/$(id -u)
+export LIBSEAT_BACKEND=seatd SEATD_VTBOUND=0
+if [[ $(uname -r) == *-quigon* ]]; then
+  # Mainline kernel: mediatek-drm drives the panel (its card number isn't fixed: Panfrost may take card0) and Mesa
+  # renders on the Mali through Panfrost natively, so no libmali, Zink or software overrides at all.
+  AQ_DRM_DEVICES=$(readlink -f /dev/dri/by-path/platform-mediatek-drm*-card | head -1)
+  export AQ_DRM_DEVICES
+  # Our VT (tty1) to graphics mode with its keyboard off, as a VT-bound seat manager would: seatd isn't (it runs
+  # with SEATD_VTBOUND=0 for the ChromeOS kernel, which has no VTs), so keys also reached tty1 and Ctrl+C there sent
+  # SIGINT to uwsm, stopping the whole session. systemd's TTYReset puts tty1 back to text mode afterwards.
+  if t=$(tty) && [[ $t == /dev/tty[0-9]* ]]; then
+    /usr/local/libexec/quigon/vt-mode graphics "$t" || echo "quigon-omarchy: vt-mode failed on $t" >&2
+  fi
+elif [[ -f /etc/quigon/gpu.env ]]; then
+  export AQ_DRM_DEVICES=/dev/dri/card0 AQ_NO_MODIFIERS=1 HYPRLAND_EGL_NO_MODIFIERS=1
+  # SDL games default to X11 (Xwayland) when DISPLAY is set, and Zink under Xwayland crashes (DRI3 needs image
+  # export); prefer Wayland, fall back to X11 for SDL builds without it.
+  export MESA_LOADER_DRIVER_OVERRIDE=zink GBM_ALWAYS_SOFTWARE=1 QT_QUICK_BACKEND=software SDL_VIDEODRIVER=wayland,x11
+else
+  export AQ_DRM_DEVICES=/dev/dri/card0 AQ_NO_MODIFIERS=1 HYPRLAND_EGL_NO_MODIFIERS=1
+  export LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe GBM_ALWAYS_SOFTWARE=1
+fi
+export XDG_SESSION_TYPE=wayland XDG_SEAT=${XDG_SEAT:-seat0}
+unset WAYLAND_DISPLAY DISPLAY
+[[ -f $HOME/.config/quigon/desktop.env ]] && source "$HOME/.config/quigon/desktop.env"
+exec uwsm start -g -1 -e -D Hyprland hyprland.desktop

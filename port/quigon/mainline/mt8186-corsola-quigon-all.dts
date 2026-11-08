@@ -1,0 +1,15 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * ASUS Chromebook CM14 (CM1406CM4A - Dotation Île-de-France)
+ * Complete mainline device tree for MT8186 / MT8189 Corsola Quigon.
+ */
+#include "mt8186-corsola-quigon.dts"
+#include "mt8189-quigon-display.dtsi"
+#include "mt8189-quigon-input.dtsi"
+#include "mt8189-quigon-usb.dtsi"
+#include "mt8189-quigon-thermal.dtsi"
+#include "mt8189-quigon-audio.dtsi"
+#include "mt8189-quigon-dp.dtsi"
+#include "mt8189-quigon-suspend.dtsi"
+#include "mt8189-quigon-tpm.dtsi"
+

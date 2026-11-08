@@ -1,0 +1,10 @@
+[Unit]
+Description=Reload ufw after a failed start (load conntrack, then reload the rules)
+# A failed ufw start leaves the DROP policies with only the user rules: no replies to outgoing traffic.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/modprobe -a nf_conntrack xt_conntrack ipt_REJECT ip6t_REJECT
+# A failed `ufw reload` writes ENABLED=no to ufw.conf, which would turn the firewall off under the other kernel too
+# (same root filesystem): keep it enabled, quigon-doctor reports the failure.
+ExecStart=/bin/sh -c '/usr/bin/ufw reload || { sed -i "s/^ENABLED=no/ENABLED=yes/" /etc/ufw/ufw.conf; exit 1; }'

@@ -1,0 +1,237 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Device Tree for ASUS Chromebook CM14 (CM1406CM4A - Dotation Île-de-France)
+ * Board: Corsola (variant quigon)
+ * SoC: MediaTek Kompanio 520 (MT8186); MT8189 has a separate DTS.
+ *
+ * Target specifications: 4 GB RAM, 64 GB eMMC, Mali-G52 MC2, 14" 1920x1080 eDP.
+ * The display bridge, codec, wireless module, GPIOs, and EC wiring below are
+ * provisional until compared with the CM14's stock ChromeOS DTB.
+ */
+
+/dts-v1/;
+#include "mt8186.dtsi"
+#include "mt6359.dtsi"
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+
+/ {
+	model = "Google Quigon (ASUS Chromebook CM14 - CM1406CM4A)";
+	chassis-type = "laptop";
+	compatible = "google,quigon-sku0", "google,quigon-sku1", "google,quigon-sku512",
+		     "google,quigon", "google,obiwan-rev3-sku196620", "google,obiwan-rev3",
+		     "google,obiwan-sku196620", "google,obiwan",
+		     "google,corsola", "mediatek,mt8189", "mediatek,mt8186";
+
+	aliases {
+		serial0 = &uart0;
+		mmc0 = &mmc0;
+		ovl0 = &disp_ovl0;
+		rdma0 = &disp_rdma0;
+		dvo0 = &disp_dvo0;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		scp_mem_reserved: memory@50000000 {
+			compatible = "shared-dma-pool";
+			reg = <0 0x50000000 0 0x2900000>;
+			no-map;
+		};
+
+		afe_dma_mem_reserved: memory@60000000 {
+			compatible = "shared-dma-pool";
+			reg = <0 0x60000000 0 0x300000>;
+			no-map;
+		};
+	};
+
+	backlight: backlight {
+		compatible = "pwm-backlight";
+		pwms = <&disp_pwm0 0 500000>;
+		power-supply = <&ppvar_sys>;
+		enable-gpios = <&pio 13 GPIO_ACTIVE_HIGH>;
+		brightness-levels = <0 1023>;
+		num-interpolated-steps = <1023>;
+		default-brightness-level = <576>;
+	};
+
+	ppvar_sys: regulator-ppvar-sys {
+		compatible = "regulator-fixed";
+		regulator-name = "ppvar_sys";
+		regulator-always-on;
+		regulator-boot-on;
+	};
+
+	pp3300_edp_x: regulator-pp3300-edp-x {
+		compatible = "regulator-fixed";
+		regulator-name = "pp3300_edp_x";
+		regulator-boot-on;
+		off-on-delay-us = <500000>;
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		enable-active-high;
+		gpio = <&pio 25 GPIO_ACTIVE_HIGH>;
+	};
+
+	pp3300_z1: regulator-pp3300-z1 {
+		compatible = "regulator-fixed";
+		regulator-name = "pp3300_z1";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+	};
+
+	rt1019p: audio-amplifier {
+		compatible = "realtek,rt1019p";
+		sdb-gpios = <&pio 5 GPIO_ACTIVE_HIGH>;
+		#sound-dai-cells = <0>;
+	};
+
+	dmic_codec: dmic-codec {
+		compatible = "dmic-codec";
+		num-channels = <2>;
+		wakeup-delay-ms = <100>;
+		#sound-dai-cells = <0>;
+	};
+
+	sound: sound {
+		compatible = "mediatek,mt8186-rt5682s", "mediatek,mt8189-rt5682s";
+		model = "mt8186_1019_rt5682s";
+		mediatek,platform = <&afe>;
+
+		audio-routing = "Headphone Jack", "HPOL",
+				"Headphone Jack", "HPOR",
+				"IN1P", "Headset Mic";
+
+		dai-link-0 {
+			link-name = "I2SOUT1_BE";
+			dai-format = "i2s";
+			mediatek,clk-provider = "cpu";
+			codec { sound-dai = <&rt1019p>; };
+		};
+
+		dai-link-1 {
+			link-name = "I2SOUT0_BE";
+			dai-format = "i2s";
+			mediatek,clk-provider = "cpu";
+			codec { sound-dai = <&rt5682s 0>; };
+		};
+
+		dai-link-2 {
+			link-name = "I2SIN0_BE";
+			dai-format = "i2s";
+			mediatek,clk-provider = "cpu";
+			codec { sound-dai = <&rt5682s 0>; };
+		};
+
+		dai-link-3 {
+			link-name = "DMIC_BE";
+			mediatek,clk-provider = "cpu";
+			codec { sound-dai = <&dmic_codec>; };
+		};
+	};
+};
+
+/* CM14 internal eMMC (MSDC0); verify timing and regulator data against stock DTB. */
+&mmc0 {
+	status = "okay";
+	pinctrl-names = "default", "state_uhs";
+	bus-width = <8>;
+	max-frequency = <200000000>;
+	cap-mmc-highspeed;
+	mmc-hs200-1_8v;
+	mmc-hs400-1_8v;
+	supports-cqe;
+	hs400-ds-delay = <0x14015>;
+	mediatek,hs200-cmd-int-delay = <0>;
+	mediatek,hs400-cmd-int-delay = <0>;
+	mediatek,hs400-cmd-resp-sel-rising;
+	vmmc-supply = <&mt6359_vemc_1_ldo_reg>;
+	vqmmc-supply = <&mt6359_vio18_ldo_reg>;
+	non-removable;
+};
+
+/* Display: 14" Full HD (1920x1080@60Hz) eDP panel */
+&edp_tx {
+	status = "okay";
+	max-lane-count = <2>;
+	max-linkrate-mhz = <5400>;
+
+	aux-bus {
+		panel: panel {
+			compatible = "edp-panel";
+			power-supply = <&pp3300_edp_x>;
+			backlight = <&backlight>;
+		};
+	};
+};
+
+/* ChromeOS Embedded Controller on SPI */
+&spi0 {
+	status = "okay";
+	cros_ec: ec@0 {
+		compatible = "google,cros-ec-spi";
+		reg = <0>;
+		interrupts-extended = <&pio 132 IRQ_TYPE_LEVEL_LOW>;
+		spi-max-frequency = <3000000>;
+		#gpio-cells = <2>;
+		gpio-controller;
+
+		cros_ec_buttons: buttons {
+			compatible = "google,cros-ec-keyb-switches";
+		};
+
+		keyboard-controller {
+			compatible = "google,cros-ec-keyb";
+			keypad,num-rows = <8>;
+			keypad,num-columns = <18>;
+			google,needs-ghost-filter;
+		};
+
+		i2c_tunnel: i2c-tunnel {
+			compatible = "google,cros-ec-i2c-tunnel";
+			google,remote-bus = <4>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			battery: sbs-battery@b {
+				compatible = "sbs,sbs-battery";
+				reg = <0xb>;
+				sbs,i2c-retry-count = <2>;
+				sbs,poll-retry-count = <10>;
+			};
+		};
+	};
+};
+
+/* Combo Jack Audio Codec: RT5682S on I2C2 */
+&i2c2 {
+	status = "okay";
+	rt5682s: codec@1a {
+		compatible = "realtek,rt5682s";
+		reg = <0x1a>;
+		interrupts-extended = <&pio 4 IRQ_TYPE_LEVEL_LOW>;
+		realtek,dmic1-data-pin = <1>;
+		realtek,dmic2-data-pin = <2>;
+		#sound-dai-cells = <1>;
+	};
+};
+
+/* Enable PCIe for the wireless module; exact module is board-variant dependent. */
+&pcie {
+	status = "okay";
+};
+
+&pciephy {
+	status = "okay";
+};

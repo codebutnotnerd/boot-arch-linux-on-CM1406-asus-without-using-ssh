@@ -1,0 +1,57 @@
+/dts-v1/;
+
+/ {
+	description = "ASUS Chromebook CM14 (Corsola Quigon / Obiwan) FIT Image for Depthcharge";
+	#address-cells = <1>;
+
+	images {
+		kernel {
+			description = "Linux Kernel ARM64";
+			data = /incbin/("Image.lz4");
+			type = "kernel_noload";
+			arch = "arm64";
+			os = "linux";
+			compression = "lz4";
+			load = <0>;
+			entry = <0>;
+			hash-1 {
+				algo = "sha256";
+			};
+		};
+
+		fdt-1 {
+			description = "mt8186-corsola-quigon.dtb";
+			data = /incbin/("mt8186-corsola-quigon.dtb");
+			type = "flat_dt";
+			arch = "arm64";
+			compression = "none";
+			hash-1 {
+				algo = "sha256";
+			};
+		};
+	};
+
+	configurations {
+		default = "conf-1";
+		conf-1 {
+			description = "ASUS Chromebook CM14 & Corsola (Quigon & Obiwan)";
+			kernel = "kernel";
+			fdt = "fdt-1";
+			compatible = "google,quigon-sku0", "google,quigon-sku1", "google,quigon-sku512", "google,quigon", "google,obiwan-rev3-sku196620", "google,obiwan-rev3", "google,obiwan-sku196620", "google,obiwan", "google,corsola", "mediatek,mt8189", "mediatek,mt8186";
+		};
+
+		conf-obiwan {
+			description = "Corsola Obiwan (rev3-sku196620 / ASUS CM14 / Acer)";
+			kernel = "kernel";
+			fdt = "fdt-1";
+			compatible = "google,obiwan-rev3-sku196620", "google,obiwan-rev3", "google,obiwan-sku196620", "google,obiwan", "google,corsola", "mediatek,mt8189", "mediatek,mt8186";
+		};
+
+		conf-corsola {
+			description = "Generic Corsola MT8186 / MT8189";
+			kernel = "kernel";
+			fdt = "fdt-1";
+			compatible = "google,corsola", "mediatek,mt8189", "mediatek,mt8186";
+		};
+	};
+};

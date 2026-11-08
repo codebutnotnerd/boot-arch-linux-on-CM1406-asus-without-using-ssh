@@ -1,0 +1,164 @@
+diff --git a/layer/layer.cpp b/layer/layer.cpp
+index d06bd7b..b30ad32 100644
+--- a/layer/layer.cpp
++++ b/layer/layer.cpp
+@@ -22,6 +22,8 @@
+  * SOFTWARE.
+  */
+ 
++#include <sys/stat.h>
++#include <sys/sysmacros.h>
+ #include <cassert>
+ #include <cstdio>
+ #include <cstring>
+@@ -1037,6 +1039,47 @@ wsi_layer_vkGetPhysicalDeviceFeatures2(VkPhysicalDevice physical_device,
+    layer::populate_supported_layer_features(physical_device, *pFeatures);
+ }
+ 
++/* quigon: ChromeOS's Mali ICD doesn't implement VK_EXT_physical_device_drm, so Mesa's Zink can't match it to the
++ * Wayland compositor's DRM device ("ZINK: failed to choose pdev") and falls back to llvmpipe. Fill the DRM properties
++ * from the real device nodes when the driver leaves them empty. */
++static void quigon_fill_drm_properties(VkPhysicalDeviceProperties2 *pProperties)
++{
++   auto *drm = util::find_extension<VkPhysicalDeviceDrmPropertiesEXT>(
++      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRM_PROPERTIES_EXT, pProperties->pNext);
++   if (drm == nullptr || drm->hasRender || drm->hasPrimary)
++   {
++      return;
++   }
++   const char *render = getenv("QUIGON_VK_DRM_RENDER");
++   const char *primary = getenv("QUIGON_VK_DRM_PRIMARY");
++   struct stat st;
++   if (stat(render ? render : "/dev/dri/renderD128", &st) == 0 && S_ISCHR(st.st_mode))
++   {
++      drm->hasRender = VK_TRUE;
++      drm->renderMajor = major(st.st_rdev);
++      drm->renderMinor = minor(st.st_rdev);
++   }
++   if (stat(primary ? primary : "/dev/dri/card0", &st) == 0 && S_ISCHR(st.st_mode))
++   {
++      drm->hasPrimary = VK_TRUE;
++      drm->primaryMajor = major(st.st_rdev);
++      drm->primaryMinor = minor(st.st_rdev);
++   }
++}
++
++VWL_VKAPI_CALL(void)
++wsi_layer_vkGetPhysicalDeviceProperties2(VkPhysicalDevice physical_device,
++                                         VkPhysicalDeviceProperties2 *pProperties) VWL_API_POST
++{
++   auto &instance = layer::instance_private_data::get(physical_device);
++   auto fn = instance.disp.get_fn<PFN_vkGetPhysicalDeviceProperties2KHR>("vkGetPhysicalDeviceProperties2KHR");
++   if (fn.has_value())
++   {
++      (*fn)(physical_device, pProperties);
++   }
++   quigon_fill_drm_properties(pProperties);
++}
++
+ #define GET_PROC_ADDR(func)      \
+    if (!strcmp(funcName, #func)) \
+       return (PFN_vkVoidFunction)&wsi_layer_##func;
+@@ -1203,6 +1246,16 @@ wsi_layer_vkGetInstanceProcAddr(VkInstance instance, const char *funcName) VWL_A
+       GET_PROC_ADDR(vkGetPhysicalDeviceFeatures2);
+    }
+ 
++   if (instance_data.is_instance_extension_enabled(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME) &&
++       !strcmp(funcName, "vkGetPhysicalDeviceProperties2KHR"))
++   {
++      return (PFN_vkVoidFunction)&wsi_layer_vkGetPhysicalDeviceProperties2;
++   }
++   if (core_1_1)
++   {
++      GET_PROC_ADDR(vkGetPhysicalDeviceProperties2);
++   }
++
+    if (instance_data.is_instance_extension_enabled(VK_KHR_SURFACE_EXTENSION_NAME))
+    {
+       PFN_vkVoidFunction wsi_func = wsi::get_proc_addr(funcName, instance_data);
+diff --git a/wsi/wayland/surface.cpp b/wsi/wayland/surface.cpp
+index e47d675..5cce63e 100644
+--- a/wsi/wayland/surface.cpp
++++ b/wsi/wayland/surface.cpp
+@@ -264,19 +264,22 @@ bool surface::init()
+ 
+    if (explicit_sync_interface.get() == nullptr)
+    {
+-      WSI_LOG_ERROR("Failed to obtain zwp_linux_explicit_synchronization_v1 interface.");
+-      return false;
++      /* quigon: compositors without zwp_linux_explicit_synchronization_v1 (Hyprland) get implicit sync:
++       * swapchain::present_image waits for the present fence on the CPU before committing. */
++      WSI_LOG_WARNING("zwp_linux_explicit_synchronization_v1 not available, falling back to CPU-waited sync.");
+    }
+-
+-   auto surface_sync_obj =
+-      zwp_linux_explicit_synchronization_v1_get_synchronization(explicit_sync_interface.get(), wayland_surface);
+-   if (surface_sync_obj == nullptr)
++   else
+    {
+-      WSI_LOG_ERROR("Failed to retrieve surface synchronization interface");
+-      return false;
+-   }
++      auto surface_sync_obj =
++         zwp_linux_explicit_synchronization_v1_get_synchronization(explicit_sync_interface.get(), wayland_surface);
++      if (surface_sync_obj == nullptr)
++      {
++         WSI_LOG_ERROR("Failed to retrieve surface synchronization interface");
++         return false;
++      }
+ 
+-   surface_sync_interface.reset(surface_sync_obj);
++      surface_sync_interface.reset(surface_sync_obj);
++   }
+ 
+    VkResult vk_res = VK_SUCCESS;
+    if (presentation_time_interface.get() != nullptr)
+diff --git a/wsi/wayland/surface_properties.cpp b/wsi/wayland/surface_properties.cpp
+index 366e262..b1285e6 100644
+--- a/wsi/wayland/surface_properties.cpp
++++ b/wsi/wayland/surface_properties.cpp
+@@ -376,7 +376,8 @@ static bool check_wl_protocols(struct wl_display *display)
+       return false;
+    }
+ 
+-   return (supported.dmabuf && supported.explicit_sync);
++   /* quigon: explicit sync is optional (see surface.cpp). */
++   return supported.dmabuf;
+ }
+ 
+ VWL_VKAPI_CALL(VkBool32)
+diff --git a/wsi/wayland/swapchain.cpp b/wsi/wayland/swapchain.cpp
+index 0e0e8ed..c1481cb 100644
+--- a/wsi/wayland/swapchain.cpp
++++ b/wsi/wayland/swapchain.cpp
+@@ -24,6 +24,8 @@
+ 
+ #define VK_USE_PLATFORM_WAYLAND_KHR 1
+ 
++#include <poll.h>
++#include <cerrno>
+ #include "surface_properties.hpp"
+ #include <cstdint>
+ #include <cstring>
+@@ -418,8 +420,19 @@ void swapchain::present_image(const pending_present_request &pending_present)
+    }
+    else if (present_sync_fd->is_valid())
+    {
+-      zwp_linux_surface_synchronization_v1_set_acquire_fence(m_wsi_surface->get_surface_sync_interface(),
+-                                                             present_sync_fd->get());
++      if (m_wsi_surface->get_surface_sync_interface() != nullptr)
++      {
++         zwp_linux_surface_synchronization_v1_set_acquire_fence(m_wsi_surface->get_surface_sync_interface(),
++                                                                present_sync_fd->get());
++      }
++      else
++      {
++         /* quigon: no explicit sync protocol; make sure rendering is done before the compositor samples it. */
++         struct pollfd pfd = { present_sync_fd->get(), POLLIN, 0 };
++         while (poll(&pfd, 1, -1) < 0 && errno == EINTR)
++         {
++         }
++      }
+    }
+ 
+    /* TODO: work out damage */

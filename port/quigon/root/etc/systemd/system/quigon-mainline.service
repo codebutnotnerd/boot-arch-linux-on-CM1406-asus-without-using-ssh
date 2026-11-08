@@ -1,0 +1,22 @@
+[Unit]
+Description=quigon: mainline-kernel mode (GPU through Mesa/Panfrost, not the libmali shims)
+# Only under the mainline test kernel (its release ends in -quigon / -quigon+); the ChromeOS kernel never matches.
+ConditionKernelVersion=*-quigon*
+DefaultDependencies=no
+After=local-fs.target sys-kernel-debug.mount
+Wants=sys-kernel-debug.mount
+Before=sysinit.target quigon-gpu-guard.service quigon-desktop.service systemd-user-sessions.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Every GPU wrapper (Hyprland drop-in, quigon-chrome/-electron/-ghostty, the bar) keys off /etc/quigon/gpu.env.
+# Masking it makes them all run stock Mesa, which on mainline is Panfrost on the Mali: no shims needed.
+ExecStart=/bin/sh -c '[ -f /etc/quigon/gpu.env ] && mount --bind /dev/null /etc/quigon/gpu.env || true'
+# The EC expects the SoC's sleep signal within its default timeout after a suspend notice and resets the machine when
+# it doesn't come; a shallow s2idle never produced it ("EC detected sleep transition timeout"). Since the SPM s2idle
+# state (mt8189-quigon-suspend.dtsi) the SoC really sleeps; the timeout stays off as a safety net. 65535 = no timeout.
+ExecStart=-/bin/sh -c 'echo 65535 > /sys/kernel/debug/cros_ec/suspend_timeout_ms'
+
+[Install]
+WantedBy=sysinit.target
