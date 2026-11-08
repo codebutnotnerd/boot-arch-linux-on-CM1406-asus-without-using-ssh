@@ -1,0 +1,22 @@
+#!/bin/bash
+# Starts a one-window Wayland kiosk (cage) running a terminal (foot) straight on the display, with software
+# rendering. Run by tarkin-console.service as the user alarm. Keyboard layout: /etc/tarkin/console.env.
+set -u
+cd "$HOME"
+export XDG_RUNTIME_DIR=/run/user/$(id -u)
+export LIBSEAT_BACKEND=seatd SEATD_VTBOUND=0
+export LANG=C.UTF-8
+# Software rendering only: no GPU driver is set up for this board.
+export WLR_RENDERER=pixman WLR_NO_HARDWARE_CURSORS=1
+# Pick the display controller (the DRM card driven by mediatek-drm); fall back to card0.
+card=/dev/dri/card0
+for c in /sys/class/drm/card[0-9]; do
+  if [[ "$(readlink -f "$c/device/driver" 2>/dev/null)" == *mediatek* ]]; then card="/dev/dri/$(basename "$c")"; break; fi
+done
+export WLR_DRM_DEVICES="$card"
+unset WAYLAND_DISPLAY DISPLAY
+# shellcheck disable=SC1091
+[[ -f /etc/tarkin/console.env ]] && . /etc/tarkin/console.env
+export XKB_DEFAULT_LAYOUT="${XKB_DEFAULT_LAYOUT:-us}"
+echo "tarkin-console: display $card, keyboard layout $XKB_DEFAULT_LAYOUT"
+exec cage -- foot

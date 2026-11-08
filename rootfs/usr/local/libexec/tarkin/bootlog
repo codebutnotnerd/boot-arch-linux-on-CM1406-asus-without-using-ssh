@@ -1,12 +1,17 @@
 #!/bin/bash
-# The Tarkin screen stays black under the stock ChromeOS kernel. This plain-text report lets you diagnose a
-# failed first boot: plug the USB stick into ChromeOS, mount partition 2 and read <root>/var/log/tarkin-boot.log.
+# The stick can fail without anything visible. This plain-text report lets you diagnose a failed boot: boot
+# ChromeOS, plug the stick in, run scripts/check-usb.sh (it prints this file), or mount partition 2 and read
+# <root>/var/log/tarkin-boot.log.
 exec > /var/log/tarkin-boot.log.tmp 2>&1
 echo "== date";            date -u
 echo "== uname";           uname -a
 echo "== cmdline";         cat /proc/cmdline
 echo "== systemd state";   systemctl is-system-running
 echo "== failed units";    systemctl --failed --no-legend
+echo "== console service"; systemctl status tarkin-console.service seatd.service --no-pager -n 30
+echo "== console journal"; journalctl -b -u tarkin-console.service -u seatd.service --no-pager 2>/dev/null | tail -80
+echo "== drm";             ls -l /dev/dri 2>&1; for c in /sys/class/drm/card*; do echo "$c -> $(readlink -f "$c/device/driver" 2>/dev/null)"; done
+echo "== input";           grep -E 'Name=|Handlers=' /proc/bus/input/devices
 echo "== network";         ip -br addr
 echo "== wlan0";           iw dev 2>/dev/null; wpa_cli -i wlan0 status 2>/dev/null
 echo "== pci";             lspci -nn 2>/dev/null

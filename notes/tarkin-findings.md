@@ -36,3 +36,4 @@ partition UUID, serial number, MAC) is reproduced here. "Seen in the DT" means n
 - An actual boot from the USB stick (the installer reuses the stock kernel and its own device tree).
 - The exact audio codec and amplifier (only the card name `mt8189_rt5650` is known) and a matching UCM profile.
 - Display, GPU, audio, touchpad and suspend under Arch Linux ARM.
+- The on-screen terminal: that mediatek-drm drives the Tarkin eDP panel (CSW, 1920x1200) from userspace without fbcon, and that the `cros_ec` keyboard works through libinput under seatd without a VT.

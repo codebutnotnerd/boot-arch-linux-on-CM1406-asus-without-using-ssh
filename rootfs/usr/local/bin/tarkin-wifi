@@ -1,0 +1,24 @@
+#!/bin/bash
+# tarkin-wifi - join a WPA2-PSK Wi-Fi network from the on-screen terminal:   sudo tarkin-wifi "NetworkName"
+# The passphrase is prompted (never passed on the command line) and stored as a hashed PSK.
+set -euo pipefail
+[[ $EUID -eq 0 ]] || { echo "Run with sudo:  sudo tarkin-wifi \"NetworkName\"" >&2; exit 1; }
+if [[ $# -ne 1 ]]; then
+  echo "Usage: sudo tarkin-wifi \"NetworkName\""
+  echo "Visible networks:"; iw dev wlan0 scan 2>/dev/null | sed -n 's/^[[:space:]]*SSID: \(.\+\)$/  \1/p' | sort -u
+  exit 1
+fi
+ssid="$1"
+read -r -s -p "Passphrase for '$ssid': " pass; echo
+(( ${#pass} >= 8 && ${#pass} <= 63 )) || { echo "WPA2 passphrases are 8-63 characters." >&2; exit 1; }
+conf=/etc/wpa_supplicant/wpa_supplicant-wlan0.conf
+mkdir -p /etc/wpa_supplicant
+{
+  echo "ctrl_interface=/run/wpa_supplicant"
+  echo "update_config=1"
+  printf '%s\n' "$pass" | wpa_passphrase "$ssid" | sed '/^[[:space:]]*#psk/d'
+} > "$conf"
+chmod 600 "$conf"
+systemctl enable wpa_supplicant@wlan0.service >/dev/null 2>&1 || true
+systemctl restart wpa_supplicant@wlan0.service systemd-networkd.service
+echo "Done. Check with:  ip -br addr show wlan0   and   ping -c3 archlinux.org"

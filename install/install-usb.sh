@@ -1,14 +1,17 @@
 #!/bin/bash
 # install-usb.sh - Arch Linux ARM on a USB stick for the ASUS Chromebook CM1406 (Google Tarkin, MT8189).
 #
-# Run on the Chromebook itself, in ChromeOS Developer Mode (VT2 / crosh shell), as root.
+# Run on the Chromebook itself, in ChromeOS Developer Mode (VT2), as root.
 # The stock ChromeOS kernel of the running slot is re-signed with the developer keys and written to the stick,
 # so the board's own device tree is used. The internal eMMC is never written.
+# LOCAL CONSOLE VARIANT: no SSH. The system starts a terminal (cage + foot, software rendering) straight on the
+# built-in display and uses the built-in keyboard.
 set -euo pipefail
 
 DEV=""
 ALARM_SOURCE="${ALARM_ARCHIVE:-https://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz}"
-PUBKEY="${PUBKEY:-}"
+KEYMAP="${KEYMAP:-fr}"
+USER_PASS=""
 WIFI_SSID="${WIFI_SSID:-}"
 WIFI_PASS="${WIFI_PASS:-}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -45,7 +48,7 @@ CURL_OPTS=(--fail --location --show-error --connect-timeout 20 --retry 3 --retry
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --alarm|-a)     ALARM_SOURCE="${2:?missing value for $1}"; shift 2 ;;
-    --pubkey|-p)    PUBKEY="${2:?missing value for $1}"; shift 2 ;;
+    --keymap|-k)    KEYMAP="${2:?missing value for $1}"; shift 2 ;;
     --wifi-ssid|-s) WIFI_SSID="${2:?missing value for $1}"; shift 2 ;;
     --wifi-pass|-w) die "Do not pass Wi-Fi passwords on the command line; the installer prompts for it." ;;
     -h|--help)
@@ -55,12 +58,12 @@ Options:
   --alarm,   -a <file|https-url>  ArchLinuxARM-aarch64 tarball (a matching .md5 file must sit next to it)
   --wifi-ssid, -s <ssid>          Wi-Fi network (WPA2-PSK); the passphrase is prompted. Default: the network
                                   saved in ChromeOS, if any.
-  --pubkey,  -p <ssh-public-key>  SSH public key for root and alarm (required: sshd is key-only)
+  --keymap,  -k <layout>          Keyboard layout of the on-screen terminal (xkb name: fr, us, de, ...). Default: fr
 Environment:
   CONFIRM_ERASE=/dev/sdX  required, must equal the target device
   ALLOW_NO_WIFI=1         allow an install without any Wi-Fi configuration
   WIFI_COUNTRY=FR         optional two-letter regulatory domain written to wpa_supplicant
-  ALLOW_NO_PKGS=1         skip the network check and the Wi-Fi tools (the stick then cannot be reached over SSH)
+  ALLOW_NO_PKGS=1         skip the network check and the Wi-Fi tools (the stick then has no on-screen terminal)
   FORCE_BOARD=1           skip the "this is a google,tarkin board" check
 USAGE
       exit 0 ;;
@@ -72,12 +75,7 @@ done
 [[ -n "$DEV" ]]       || die "Usage: sudo $0 [options] /dev/sdX"
 [[ "$EUID" -eq 0 ]]   || die "Run this script as root."
 [[ -b "$DEV" ]]       || die "Target is not a block device: $DEV"
-[[ -n "$PUBKEY" ]]    || die "--pubkey is required: sshd is key-only and the screen stays black, so without an SSH key the booted system cannot be reached."
-case "$PUBKEY" in
-  ssh-*|ecdsa-*|sk-*) ;;
-  *) die "--pubkey does not look like an SSH public key line." ;;
-esac
-[[ "$PUBKEY" != *$'\n'* ]] || die "--pubkey must be a single line."
+[[ "$KEYMAP" =~ ^[a-z0-9_+-]{2,20}$ ]] || die "--keymap must be an xkb layout name such as fr or us."
 
 echo "=== Target: ASUS Chromebook CM1406 (Google Tarkin, MT8189) ==="
 
@@ -158,8 +156,8 @@ if [[ -n "$WIFI_SSID" && -z "$WIFI_PASS" ]]; then
   fi
   [[ -n "$WIFI_PASS" ]] || die "No Wi-Fi passphrase provided; omit --wifi-ssid or rerun interactively."
 fi
-if [[ -z "$WIFI_SSID" && "${ALLOW_NO_WIFI:-0}" != 1 ]]; then
-  die "No Wi-Fi network: pass --wifi-ssid <name> (or ALLOW_NO_WIFI=1 if you have another way in)."
+if [[ -z "$WIFI_SSID" ]]; then
+  echo "[i] No Wi-Fi network configured. After booting, use  sudo tarkin-wifi \"NetworkName\"  in the terminal."
 fi
 if [[ -n "$WIFI_SSID" ]]; then
   [[ "$WIFI_SSID" != *$'\n'* && "$WIFI_SSID" != *$'\r'* ]] || die "SSIDs containing line breaks are not supported."
@@ -172,7 +170,17 @@ fi
 if [[ "${ALLOW_NO_PKGS:-0}" != 1 ]]; then
   echo "== Checking network access to the Arch Linux ARM package mirror..."
   curl -sSI --connect-timeout 15 --max-time 30 http://mirror.archlinuxarm.org/aarch64/core/core.db >/dev/null 2>&1 \
-    || die "Cannot reach mirror.archlinuxarm.org from this shell. Check that ChromeOS has internet (Wi-Fi connected), try another network (a phone hotspot), or set ALLOW_NO_PKGS=1 to install without Wi-Fi tools (the stick then cannot be reached over SSH)."
+    || die "Cannot reach mirror.archlinuxarm.org from this shell. Check that ChromeOS has internet (Wi-Fi connected), try another network (a phone hotspot), or set ALLOW_NO_PKGS=1 to install without Wi-Fi tools (the stick then has no on-screen terminal)."
+fi
+
+# Password of the local user (there is no SSH: this is the account you type in on the keyboard).
+if [[ -t 0 ]]; then
+  read -r -s -p "Password for the user 'alarm' (empty keeps the default, 'alarm'): " USER_PASS; echo
+  if [[ -n "$USER_PASS" ]]; then
+    read -r -s -p "Repeat the password: " pass2; echo
+    [[ "$USER_PASS" == "$pass2" ]] || die "The two passwords differ."
+    [[ "$USER_PASS" != *$'\n'* && "$USER_PASS" != *:* ]] || die "The password must not contain a colon."
+  fi
 fi
 
 echo "Target USB device : $DEV"
@@ -235,13 +243,17 @@ echo "== Installing Tarkin configuration..."
 printf 'PARTUUID=%s / ext4 defaults,noatime 0 1\n' "$ROOT_PARTUUID" > "$MNT/etc/fstab"
 echo "asus-cm1406" > "$MNT/etc/hostname"
 cp -R --no-preserve=ownership "$REPO_ROOT/rootfs/." "$MNT/"
-chown -R 0:0 "$MNT/etc/ssh/sshd_config.d" "$MNT/etc/systemd/logind.conf.d" "$MNT/etc/sysctl.d" \
-             "$MNT/etc/systemd/system/tarkin-bootlog.service" "$MNT/etc/systemd/system/tarkin-bootlog.timer" \
-             "$MNT/usr/local/libexec/tarkin"
-chmod 644 "$MNT"/etc/ssh/sshd_config.d/10-tarkin-keys-only.conf "$MNT"/etc/systemd/logind.conf.d/10-tarkin-no-suspend.conf \
-          "$MNT"/etc/sysctl.d/90-tarkin-panic.conf "$MNT"/etc/systemd/system/tarkin-bootlog.service \
-          "$MNT"/etc/systemd/system/tarkin-bootlog.timer
-chmod 755 "$MNT/usr/local/libexec/tarkin" "$MNT/usr/local/libexec/tarkin/bootlog"
+# Overlay files: root-owned, config 644, scripts 755.
+( cd "$REPO_ROOT/rootfs" && find . -type f ) | while read -r f; do
+  chown 0:0 "$MNT/$f"
+  case "$f" in ./usr/local/bin/*|./usr/local/libexec/*) chmod 755 "$MNT/$f" ;; *) chmod 644 "$MNT/$f" ;; esac
+done
+# Keyboard layout of the on-screen terminal.
+mkdir -p "$MNT/etc/tarkin"
+printf 'XKB_DEFAULT_LAYOUT=%s\n' "$KEYMAP" > "$MNT/etc/tarkin/console.env"
+chmod 644 "$MNT/etc/tarkin/console.env"
+# Lingering: /run/user/1000 exists for the console session from the start of the boot.
+mkdir -p "$MNT/var/lib/systemd/linger"; : > "$MNT/var/lib/systemd/linger/alarm"
 
 # Persistent journal.
 mkdir -p "$MNT/var/log/journal"
@@ -263,13 +275,6 @@ for blob in WIFI_MT7925_PATCH_MCU_1_1_hdr.bin WIFI_RAM_CODE_MT7925_1_1.bin BT_RA
       || { rm -f "$FW_DIR/$blob"; echo "   [!] $blob unavailable: Wi-Fi may not come up." >&2; }
   fi
 done
-
-# SSH keys for root and alarm (the ALARM tarball already has the alarm user, uid 1000).
-install -d -m 700 "$MNT/root/.ssh" "$MNT/home/alarm/.ssh"
-printf '%s\n' "$PUBKEY" > "$MNT/root/.ssh/authorized_keys"
-printf '%s\n' "$PUBKEY" > "$MNT/home/alarm/.ssh/authorized_keys"
-chmod 600 "$MNT/root/.ssh/authorized_keys" "$MNT/home/alarm/.ssh/authorized_keys"
-chown -R 1000:1000 "$MNT/home/alarm/.ssh"
 
 # Networking: systemd-networkd + wpa_supplicant.
 mkdir -p "$MNT/etc/systemd/network"
@@ -301,7 +306,7 @@ if [[ -n "$WIFI_SSID" ]]; then
 fi
 
 # The Arch Linux ARM tarball has no Wi-Fi tools: install them in a chroot (same architecture, runs natively).
-echo "== Installing wpa_supplicant, iw and pciutils in the new rootfs (chroot, needs network)..."
+echo "== Installing the terminal (cage, foot, seatd), Wi-Fi tools and sudo in the new rootfs (chroot, needs network)..."
 mount --bind /proc "$MNT/proc"; mount --bind /sys "$MNT/sys"; mount --bind /dev "$MNT/dev"
 mount -t tmpfs tmpfs "$MNT/tmp"
 resolv_saved=0
@@ -311,9 +316,23 @@ fi
 cp /etc/resolv.conf "$MNT/etc/resolv.conf" || true
 printf 'nameserver 1.1.1.1\nnameserver 9.9.9.9\n' >> "$MNT/etc/resolv.conf"   # fallback if ChromeOS uses a local-only resolver
 PKG_OK=1
-chroot "$MNT" /bin/bash -c 'pacman-key --init >/dev/null 2>&1 && pacman-key --populate archlinuxarm >/dev/null 2>&1 && pacman -Syu --noconfirm --needed wpa_supplicant iw pciutils' \
+chroot "$MNT" /bin/bash -c 'pacman-key --init >/dev/null 2>&1 && pacman-key --populate archlinuxarm >/dev/null 2>&1 && pacman -Syu --noconfirm --needed wpa_supplicant iw pciutils seatd cage foot foot-terminfo ttf-dejavu sudo nano' \
   || { PKG_OK=0; echo "[!] Package install failed (no network from this shell?)." >&2; }
-[[ -x "$MNT/usr/bin/wpa_supplicant" ]] || PKG_OK=0
+[[ -x "$MNT/usr/bin/wpa_supplicant" && -x "$MNT/usr/bin/cage" && -x "$MNT/usr/bin/foot" && -x "$MNT/usr/bin/seatd" ]] || PKG_OK=0
+
+# Local account: input/video/render groups (existing ones only), sudo for wheel, chosen password, root locked.
+if [[ -x "$MNT/usr/bin/usermod" ]]; then
+  for g in video input render audio seat seatd wheel; do
+    chroot "$MNT" getent group "$g" >/dev/null 2>&1 && chroot "$MNT" usermod -aG "$g" alarm || true
+  done
+  echo '%wheel ALL=(ALL:ALL) ALL' > "$MNT/etc/sudoers.d/10-wheel"; chmod 440 "$MNT/etc/sudoers.d/10-wheel"
+  if [[ -n "$USER_PASS" ]]; then
+    printf 'alarm:%s\n' "$USER_PASS" | chroot "$MNT" chpasswd && chroot "$MNT" passwd -l root >/dev/null 2>&1 \
+      && echo "   Password set for alarm; root login locked (use sudo)." || echo "[!] Could not set the password: the default 'alarm' / 'alarm' stays."
+  else
+    echo "   Default account kept: alarm / alarm (change it with 'passwd')."
+  fi
+fi
 
 # Replace the cleartext passphrase by a hashed PSK (ChromeOS has no python3, wpa_passphrase comes from the chroot).
 if [[ -n "$WIFI_SSID" && -x "$MNT/usr/bin/wpa_passphrase" ]]; then
@@ -348,7 +367,8 @@ enable_unit() {   # enable_unit <unit-file-in-rootfs> <wants-dir> [link-name]
 enable_unit /usr/lib/systemd/system/systemd-networkd.service "$WANTS"
 enable_unit /usr/lib/systemd/system/systemd-resolved.service "$WANTS"
 enable_unit /usr/lib/systemd/system/systemd-timesyncd.service "$WANTS"
-enable_unit /usr/lib/systemd/system/sshd.service "$WANTS"
+enable_unit /usr/lib/systemd/system/seatd.service "$WANTS"
+enable_unit /etc/systemd/system/tarkin-console.service "$WANTS"
 enable_unit /etc/systemd/system/tarkin-bootlog.timer "$MNT/etc/systemd/system/timers.target.wants"
 if [[ -n "$WIFI_SSID" ]]; then
   enable_unit /usr/lib/systemd/system/wpa_supplicant@.service "$WANTS" wpa_supplicant@wlan0.service
@@ -373,7 +393,7 @@ if [[ "${PKG_OK:-1}" != 1 && "${ALLOW_NO_PKGS:-0}" != 1 ]]; then
   cat <<'WARN'
 ##########################################################
 [!] WARNING: wpa_supplicant could NOT be installed on the stick.
-    It will probably boot but will not connect to Wi-Fi, so you will not be able to SSH in.
+    The system will probably boot but will have no on-screen terminal and no Wi-Fi tools.
     Fix the network (see README, "Troubleshooting") and run the installer again.
 ##########################################################
 WARN
@@ -385,10 +405,12 @@ cat <<EOF
 Boot it:
  1. Leave the stick plugged in and power the Chromebook off, then on.
  2. At the 'OS verification is OFF' screen press Ctrl+U.
- 3. EXPECT A BLACK SCREEN (stock kernel, no console). Wait 1-3 minutes, find the IP address
-    in your router and connect:   ssh -i <private-key> alarm@<ip>   (or root@<ip>)
+ 3. Wait 1-2 minutes: a terminal should appear on the screen (the firmware logo may stay up for a while).
+    Log in is automatic as 'alarm'; use  sudo  for administration and  sudo tarkin-wifi "Network"  for Wi-Fi.
+    If the screen stays black or frozen on the logo for 3 minutes, this experimental console did not start:
+    power off, then see README, "Troubleshooting".
 
-If it never appears on the network: power off, unplug the stick, press Ctrl+D to boot ChromeOS.
+If nothing works: hold the power button, unplug the stick, then press Ctrl+D to boot ChromeOS.
 To see what happened: run  sudo bash scripts/check-usb.sh  in ChromeOS (see README, "Troubleshooting").
 ==========================================================
 EOF

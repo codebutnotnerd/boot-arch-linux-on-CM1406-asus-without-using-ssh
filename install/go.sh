@@ -1,8 +1,8 @@
 #!/bin/bash
 # go.sh - guided launcher for the installer, made for the ChromeOS VT2 console (no copy/paste, QWERTY keyboard).
-# It finds your SSH key and the Arch Linux ARM tarball, detects the USB stick, asks one confirmation and runs
+# It finds the Arch Linux ARM tarball, detects the USB stick, asks one confirmation and runs
 # install-usb.sh. Run it as root from VT2:   sudo bash install/go.sh
-# Extra arguments are passed to install-usb.sh (for example  --wifi-ssid "MyNetwork").
+# Extra arguments are passed to install-usb.sh (for example  --wifi-ssid "MyNetwork"  or  --keymap us).
 set -euo pipefail
 [[ $EUID -eq 0 ]] || { echo "Run as root:  sudo bash install/go.sh" >&2; exit 1; }
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,15 +19,7 @@ usb_disks() {   # prints "name size model" for each removable USB disk
   done
 }
 
-# 1. SSH public key
-KEY=""
-for c in "${KEY_FILE:-}" /var/tmp/key.pub /home/chronos/user/key.pub "$ROOT/key.pub" /home/chronos/user/arch-install/key.pub; do
-  [[ -n "$c" && -s "$c" ]] && { KEY="$c"; break; }
-done
-[[ -n "$KEY" ]] || { echo "[-] SSH public key not found. Create /var/tmp/key.pub in the crosh tab first (see README step 3)." >&2; exit 1; }
-echo "SSH key   : $KEY"
-
-# 2. Arch Linux ARM tarball (with its .md5 beside it)
+# 1. Arch Linux ARM tarball (with its .md5 beside it)
 ALARM=""
 for dir in /var/tmp /home/chronos/user/MyFiles/Downloads /home/chronos/user/Downloads /home/chronos/u-*/MyFiles/Downloads /home/chronos/u-*/Downloads "$ROOT" "$ROOT/.."; do
   [[ -f "$dir/ArchLinuxARM-aarch64-latest.tar.gz" ]] && { ALARM="$dir/ArchLinuxARM-aarch64-latest.tar.gz"; break; }
@@ -41,7 +33,7 @@ else
   echo "Rootfs    : not found locally, the installer will download it (can be slow; see README if it stalls)"
 fi
 
-# 3. USB stick
+# 2. USB stick
 mapfile -t disks < <(usb_disks)
 if (( ${#disks[@]} == 0 )); then
   echo "[-] No USB stick detected. Replug it, wait 5 seconds, try another port, then run this again." >&2
@@ -62,4 +54,4 @@ echo "ALL DATA ON $DEV WILL BE ERASED."
 read -r -p "Type the device name again to confirm ($DEV): " confirm
 [[ "$confirm" == "$DEV" ]] || { echo "[-] Confirmation did not match. Aborting." >&2; exit 1; }
 
-exec env CONFIRM_ERASE="$DEV" bash "$HERE/install-usb.sh" "${ALARM_ARGS[@]}" --pubkey "$(cat "$KEY")" "$@" "$DEV"
+exec env CONFIRM_ERASE="$DEV" bash "$HERE/install-usb.sh" "${ALARM_ARGS[@]}" "$@" "$DEV"
