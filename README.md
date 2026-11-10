@@ -1,258 +1,226 @@
-# Arch Linux ARM on the ASUS Chromebook CM1406 (Skywalker / Tarkin), no SSH
+# Arch Linux ARM on the ASUS Chromebook CM1406 (no SSH)
 
-**Target:** ASUS Chromebook CM1406, board `google,tarkin` (Skywalker family), SoC MediaTek MT8189, eMMC storage.
-**Method:** boot from a USB stick through ChromeOS Developer Mode.
-**Internal storage:** never touched. ChromeOS stays installed; without the stick the machine boots ChromeOS.
-**No SSH, no second device:** the system draws a terminal on the built-in screen and uses the built-in keyboard.
+This boots Arch Linux ARM from a USB stick on the ASUS Chromebook CM1406 (board `google,tarkin`, MediaTek MT8189,
+eMMC). ChromeOS stays on the internal storage and is never touched. Unplug the stick and the machine boots ChromeOS
+like before.
 
-The installer takes the **stock ChromeOS kernel of your own machine** (it already contains the Tarkin device tree),
-re-signs it with the developer keys and boots an Arch Linux ARM userland from the stick. This is **not mainline Linux**.
-The stock kernel has no text console, so the system starts a small Wayland kiosk (`cage`) running a terminal (`foot`)
-directly on the display controller with software rendering. An optional Windows 11 style desktop is available.
+There is no SSH and no second computer involved. The system draws a terminal on the built-in screen and you type on
+the built-in keyboard.
 
-## Status
+How it works: the installer takes the kernel ChromeOS already runs on your machine (it contains the Tarkin device
+tree), signs it again with the Developer Mode keys, and puts an Arch Linux ARM root filesystem next to it on the
+stick. It is not mainline Linux. That kernel has no text console, so the system starts `cage` (a tiny Wayland
+kiosk) with `foot` in it and draws straight on the display with software rendering. There is an optional desktop on
+top of that.
 
-| Feature | Status |
-|---|---|
-| Boot from USB through Developer Mode | Verified on a CM1406 |
-| On-screen terminal and built-in keyboard | Verified |
-| Wi-Fi (MT7925) and `pacman` | Verified |
-| Desktop (`labwc`, `waybar`, `fuzzel`) | Written, **not yet tested on hardware** |
-| GPU acceleration (Mali-G57) | Experimental, not integrated (see below) |
-| Audio, Bluetooth, suspend, touchpad and touchscreen in the terminal, brightness keys | Not tested |
+## What works
 
-## What you get
+Tested on a real CM1406:
 
-- A terminal on the built-in display, logged in automatically as `alarm` (`sudo` for administration)
-- Keyboard layout chosen at install time (`fr` by default, `--keymap us` for QWERTY)
-- Wi-Fi through `wpa_supplicant` and `systemd-networkd`; join a network with `sudo tarkin-wifi "NetworkName"`
-- Packages with `sudo pacman -S ...` once Wi-Fi is up
-- No suspend (lid and idle ignored), reboot 10 s after a kernel panic, persistent journal
-- A diagnostics report at `/var/log/tarkin-boot.log` (90 s after boot, then every 10 minutes)
-- `~/install-desktop.sh` and `tarkin-session` for the optional desktop
+- Booting from USB in Developer Mode
+- The on-screen terminal and the built-in keyboard
+- Wi-Fi (MT7925) and `pacman`
 
-Default account: `alarm` / `alarm`, unless you set a password during the install.
+Written but not tested on the hardware yet: the desktop (`labwc`, `waybar`, `fuzzel`).
 
-## Requirements
+Not tested at all: audio, Bluetooth, suspend, touchpad and touchscreen, brightness keys. The GPU is not used (see
+the GPU section).
 
-- CM1406 in **ChromeOS Developer Mode** (`OS verification is OFF` screen at every boot).
-- A USB stick of **8 GB or more**, USB 3.0 from a known brand. **Everything on it is erased.**
-- A WPA2-PSK Wi-Fi network (a phone hotspot is fine). The Chromebook needs working internet **during the install**.
+Login is automatic as `alarm`, password `alarm` unless you set another one during the install. Suspend is off, the
+machine reboots 10 seconds after a kernel panic, and the journal is kept on the stick.
 
-## Why two terminals
+## You need
 
-On recent ChromeOS the terminal opened with `Ctrl+Alt+T` (crosh, then `shell`) **cannot use `sudo`**. The VT2
-console can, but it has no copy/paste and a QWERTY keyboard.
+- A CM1406 in ChromeOS Developer Mode (the "OS verification is OFF" screen at every boot)
+- A USB stick of 8 GB or more, preferably USB 3.0. Everything on it will be erased.
+- A WPA2 Wi-Fi network (a phone hotspot works). The Chromebook needs internet while you install, because the
+  terminal and Wi-Fi packages are downloaded then.
 
-| Where | Used for |
-|---|---|
-| **Browser + crosh tab** (`Ctrl+Alt+T`, then `shell`) | Downloads and unpacking. Never needs root. |
-| **VT2** (`Ctrl+Alt+Refresh`, login `chronos`) | The few short commands that need `sudo`. Back to the desktop: `Ctrl+Alt+Back`. |
+## Two terminals
 
-`/var/tmp` is shared by both.
+On recent ChromeOS, the terminal from `Ctrl+Alt+T` (crosh, then `shell`) cannot run `sudo`. The VT2 console can, but
+it has no copy/paste and a QWERTY keyboard. So: use the browser terminal for downloads and unzipping, and VT2
+(`Ctrl+Alt+Refresh`, login `chronos`, back with `Ctrl+Alt+Back`) for the few commands that need `sudo`. `/var/tmp`
+is shared by both.
 
-## Installation
+## Install
 
-### 1. Download with the ChromeOS browser
+**1. Download** these with the ChromeOS browser into Downloads: this repository as a zip, and
+<https://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz> plus its `.md5` file next to it.
 
-Save these into *Downloads*:
-
-- this repository as a zip (GitHub, **Code, Download ZIP**)
-- <https://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz> (about 0.5-1 GB)
-- <https://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz.md5>
-
-### 2. Prepare in the crosh tab (`Ctrl+Alt+T`, then `shell`)
+**2. Unpack** in the crosh tab (`Ctrl+Alt+T`, then `shell`):
 
 ```sh
 cd /var/tmp
-bsdtar -xf ~/MyFiles/Downloads/<name-of-the-repository-zip>.zip
+bsdtar -xf ~/MyFiles/Downloads/<repository-zip-name>.zip
 cp ~/MyFiles/Downloads/ArchLinuxARM-aarch64-latest.tar.gz* /var/tmp/
 md5sum -c ArchLinuxARM-aarch64-latest.tar.gz.md5
 ls /var/tmp
 ```
 
-`md5sum` must print `...tar.gz: OK`. Note the name of the unpacked folder.
+`md5sum` must say `OK`. Note the name of the unpacked folder.
 
-### 3. Preflight, in VT2
-
-Plug the USB stick in, press `Ctrl+Alt+Refresh`, log in as `chronos`, then:
+**3. Preflight.** Plug in the stick, switch to VT2 and run:
 
 ```sh
 cd /var/tmp/<unpacked-folder>
 sudo bash scripts/preflight-tarkin.sh
 ```
 
-The report is `/var/tmp/pf/report.txt`. It must say `board: OK (google,tarkin)` and `repack: OK`. Stop if a line
-contains `MISSING`, `ABSENT` or `FAILED` (an `ABSENT` on an `mt7925` firmware line is fine).
+The report goes to `/var/tmp/pf/report.txt`. You want `board: OK (google,tarkin)` and `repack: OK`. If any line says
+`MISSING`, `ABSENT` or `FAILED`, stop and look at it. An `ABSENT` on an `mt7925` firmware line is harmless.
 
-### 4. Install, in VT2
+**4. Install**, still in VT2:
 
 ```sh
 sudo bash install/go.sh
 ```
 
-`go.sh` finds the tarball, detects the USB stick, shows it and asks you to type its name to confirm. The installer
-then asks for a password for `alarm` (empty keeps the default; if you set one, root login is locked). It checks the
-package mirror **before** erasing anything, reads the kernel back after writing it, and prints `[+] USB written`.
-Wait for that line and do not unplug the stick.
+It finds the tarball and the stick, shows you the device and makes you type its name before erasing anything. It then
+asks for a password for `alarm` (leave it empty to keep the default; if you set one, root login is locked). It
+checks that the package mirror answers before it erases anything, and it reads the kernel back after writing it.
+Wait for `[+] USB written` before you unplug.
 
-Options (after `go.sh`, e.g. `sudo bash install/go.sh --keymap us`):
+Options go after `go.sh`, for example `sudo bash install/go.sh --keymap us`:
 
-| Option / variable | Purpose |
+| Option | Meaning |
 |---|---|
-| `--keymap <layout>` | Keyboard layout of the terminal (xkb name: `fr`, `us`, `de`, ...). Default `fr` |
-| `--wifi-ssid <name>` | Wi-Fi network instead of the ChromeOS-saved one (passphrase prompted) |
-| `--alarm <file\|https-url>` | Rootfs tarball (its `.md5` beside it) |
-| `WIFI_COUNTRY=FR` | Wi-Fi regulatory domain |
-| `ALLOW_NO_PKGS=1` | Skip the network check and the packages (the stick then has no terminal) |
-| `FORCE_BOARD=1` | Skip the `google,tarkin` check (not recommended) |
+| `--keymap <layout>` | Keyboard layout of the terminal (`fr`, `us`, `de`, ...). Default `fr`. |
+| `--wifi-ssid <name>` | Use this Wi-Fi instead of the one saved in ChromeOS (it asks for the passphrase). |
+| `--alarm <file or https url>` | Rootfs tarball, with its `.md5` next to it. |
+| `WIFI_COUNTRY=FR` | Wi-Fi regulatory domain (environment variable). |
+| `ALLOW_NO_PKGS=1` | Skip the network check and the packages. The stick will have no terminal. |
+| `FORCE_BOARD=1` | Skip the `google,tarkin` check. Not recommended. |
 
-### 5. Boot
+**5. Boot.** Leave the stick in, power off, power on. At the "OS verification is OFF" screen press `Ctrl+U`, or
+use the arrow keys and Enter on "Boot from external disk" if you get the newer menu. After a minute or two a terminal
+replaces the logo. If you did not set Wi-Fi during the install, run `sudo tarkin-wifi "NetworkName"`.
 
-1. Leave the stick plugged in, power the Chromebook off, then on.
-2. At the `OS verification is OFF` screen, press `Ctrl+U`, or use the arrow keys and Enter on
-   **Boot from external disk** in the new developer menu.
-3. Wait 1-2 minutes. A terminal replaces the firmware logo. If you set no Wi-Fi at install:
-   `sudo tarkin-wifi "NetworkName"`.
+## Desktop
 
-## Desktop (optional, Windows 11 style)
-
-Needs working Wi-Fi. In the on-screen terminal:
+Needs Wi-Fi. In the on-screen terminal:
 
 ```sh
 bash ~/install-desktop.sh
 sudo tarkin-session desktop
 ```
 
-This installs `labwc` (windows), `waybar` (centred taskbar), `fuzzel` (start menu), `mako`, `swaybg`, `foot`,
-Papirus icons, the Inter font, `adw-gtk-theme` and `pcmanfm`, and writes dark-theme configuration into `~/.config`.
-The display restarts and shows the desktop, now and at every boot.
+The script installs `labwc`, `waybar`, `fuzzel`, `mako`, `swaybg`, `foot`, Papirus icons, the Inter font,
+`adw-gtk-theme` and `pcmanfm`, and writes a dark Windows-11-like setup into `~/.config` (taskbar centred at the
+bottom, start menu on `fuzzel`). The screen restarts and shows the desktop, and keeps doing so at every boot.
 
-| Key | Action |
-|---|---|
-| `Super+d` | Start menu |
-| `Super+Enter` | Terminal |
-| `Super+e` | File manager |
-| `Super+q` | Close window |
+Keys: `Super+d` start menu, `Super+Enter` terminal, `Super+e` files, `Super+q` close window.
 
-- Back to the plain terminal: `sudo tarkin-session terminal`.
-- If the desktop exits within 15 seconds of starting, the display falls back to the terminal by itself.
-- `bash ~/install-desktop.sh --configs-only` rewrites only the user configuration (old files are kept as `*.bak.*`).
-- Rendering is in software: expect a light desktop, not a smooth one.
+To go back to the plain terminal: `sudo tarkin-session terminal`. If the desktop dies within 15 seconds of
+starting, the screen falls back to the terminal on its own. `bash ~/install-desktop.sh --configs-only` only rewrites
+the config files (the old ones are kept as `*.bak.*`). Rendering is in software, so don't expect it to be smooth.
 
-## GPU Mali-G57: experimental bring-up
+## GPU (Mali-G57), experimental
 
-Results reported from the owner's machine (Arch Linux ARM, kernel 6.6.147). They are **not** part of the installer
-and **not** integrated into the desktop. Neither `labwc` nor Firefox is GPU accelerated.
+This is what was done by hand on the owner's machine. It is not in the installer and not used by the desktop. Neither
+`labwc` nor Firefox is accelerated.
 
 | Item | Status |
 |---|---|
-| Mali-G57 detected by the kernel (KBase driver `r54p1-12eac0`, `/dev/mali0`, `/dev/dri/renderD128`) | Verified |
-| `libmali.so.0.54.1` (same DDK) extracted read-only from the ChromeOS root partition | Verified |
-| `DT_RELR` metadata fixed with LIEF so glibc on Arch loads it | Verified |
-| EGL 1.5, OpenGL ES 3.2 | PASS |
-| Framebuffer clear and pixel read-back | PASS |
-| DMA-BUF render, 10 frames, 0 bad | PASS |
-| EGL shim (device discovery), standalone | PASS |
-| Integration with `labwc` / wlroots | Not tested |
-| Firefox acceleration (WebRender) | Not tested |
-| Firefox hardware video decoding | Not tested |
+| Kernel detects the Mali-G57 (KBase driver `r54p1-12eac0`, `/dev/mali0`, `/dev/dri/renderD128`) | Checked |
+| `libmali.so.0.54.1` (same DDK) copied read-only from the ChromeOS root partition | Checked |
+| `DT_RELR` metadata patched with LIEF so Arch's glibc loads it | Checked |
+| EGL 1.5 and OpenGL ES 3.2 | Pass |
+| Framebuffer clear and pixel read-back | Pass |
+| DMA-BUF render, 10 frames, 0 bad | Pass |
+| EGL shim, standalone | Pass |
+| `labwc` / wlroots using it | Not tried |
+| Firefox acceleration and video decoding | Not tried |
 
-Notes:
+The ChromeOS partition is mounted with `mount -o ro,noload` and never written to. The Mali libraries live in
+`~/gpu-test/mali/lib` and are only picked up through `LD_LIBRARY_PATH`; system Mesa, `libEGL` and `libGLESv2` are left
+alone. Extra packages used: `libc++`, `libc++abi`, `gcc`, and `python-pip` with `lief` in a virtualenv. The probe
+programs and the EGL shim come from zoan37's MT8189 project
+(<https://github.com/zoan37/lenovo-slim3-chromebook-omarchy>, `bringup/`), which is built for Hyprland. Nobody has
+shown that it works with `labwc`, so don't preload it into the desktop session. Firefox still reports
+`WebRender (Software)` and `llvmpipe`.
 
-- The ChromeOS partition is mounted read-only (`mount -o ro,noload`) and never written to.
-- The libraries live in an isolated directory (`~/gpu-test/mali/lib`) and are used only through `LD_LIBRARY_PATH`.
-  System Mesa, `libEGL` and `libGLESv2` are not replaced.
-- Extra packages used: `libc++`, `libc++abi` (needed by libmali), `gcc` (test programs), `python-pip` and `lief` in a
-  virtual environment.
-- The probe programs and the EGL shim come from the MT8189 reference project by zoan37
-  (<https://github.com/zoan37/lenovo-slim3-chromebook-omarchy>, `bringup/`), which targets Hyprland. It is not shown
-  to work with `labwc`; do not preload it into the desktop session.
-- Until the compositor integration is validated, Firefox still reports `WebRender (Software)` and `llvmpipe`.
+Two things that came up on the way:
 
-Side notes from the same machine:
+- If names don't resolve but `ping 1.1.1.1` works, `sudo resolvectl dns wlan0 1.1.1.1 8.8.8.8` fixes it until the next
+  reboot.
+- Bubblewrap (Thunar, Glycin) can fail with `Unexpected capabilities but not setuid` because the process carries
+  `CAP_WAKE_ALARM`. Starting it as `setpriv --inh-caps=-wake_alarm --ambient-caps=-wake_alarm -- <command>` drops it.
+  That is how Waybar was restarted.
 
-- DNS: if names do not resolve while pings to `1.1.1.1` work, `sudo resolvectl dns wlan0 1.1.1.1 8.8.8.8` is a
-  temporary fix (it does not survive a reboot).
-- Bubblewrap (Thunar, Glycin) can complain `Unexpected capabilities but not setuid`: the process carries
-  `CAP_WAKE_ALARM`. Starting a program with `setpriv --inh-caps=-wake_alarm --ambient-caps=-wake_alarm -- <command>`
-  drops it. Waybar was restarted this way.
+## When it doesn't work
 
-## Troubleshooting
-
-First, boot ChromeOS (no stick, or `Ctrl+D`), plug the stick in and run, in VT2:
+Boot ChromeOS (no stick, or `Ctrl+D`), plug the stick back in and run this in VT2:
 
 ```sh
 sudo bash scripts/check-usb.sh
 ```
 
-It checks the firmware flags, the partition table, the kernel signature and the stick contents, and prints the
-stick's `tarkin-boot.log` and the crash log of the last failed boot.
+It checks the firmware flags, the partition table, the kernel signature and the stick's contents, and prints
+`tarkin-boot.log` from the stick plus the crash log of the last failed boot.
 
-| Symptom | Cause and fix |
+| Problem | What to do |
 |---|---|
-| `sudo` fails in the `Ctrl+Alt+T` terminal | Expected. Run `sudo` commands in VT2 only. |
-| Cannot log in on VT2 | The user is `chronos`. |
-| VT2 types wrong characters | VT2 is QWERTY. |
-| `go.sh`: no USB stick detected | Replug, wait 5 s, try another port (no hub) or another stick. `dmesg \| tail` should show `sd 0:0:0:0: [sda]`. |
+| `sudo` fails in the `Ctrl+Alt+T` terminal | Normal. Use VT2. |
+| Can't log in on VT2 | The user is `chronos`. |
+| Wrong characters in VT2 | VT2 is QWERTY. |
+| `go.sh` finds no USB stick | Replug, wait 5 s, try another port (no hub) or another stick. `dmesg \| tail` should show `sd 0:0:0:0: [sda]`. |
 | `curl` hangs on the rootfs | Download it with the browser (step 1) and put it in `/var/tmp`. |
-| `Cannot reach mirror.archlinuxarm.org` | ChromeOS has no internet, or the network filters it. Use Wi-Fi or a phone hotspot. |
-| Warning: packages could NOT be installed | Same cause. Fix the network and run the installer again, otherwise there is no terminal. |
-| Firmware says "No valid image detected" | The firmware rejected the stick. `check-usb.sh` says whether partition 1 is not a kernel partition, has priority 0, fails to verify, or `dev_boot_usb` is 0. |
-| Boots ChromeOS instead of the stick | The menu choice was missed, or `dev_boot_usb` is 0: `sudo crossystem dev_boot_usb=1 dev_boot_signed_only=0`. |
-| Freezes right after "jumping to kernel" | The kernel preamble flags were not 0. The installer and `set-cmdline.sh` use `--flags 0`; re-run the installer or `set-cmdline.sh --normal`. |
-| Reboots to the `OS verification is OFF` screen | The kernel started and died. Boot ChromeOS and run `check-usb.sh`: it prints the previous boot's crash log (pstore). |
-| Screen black for 3 minutes | The terminal did not start. Read `tarkin-boot.log` via `check-usb.sh`: `console journal`, `drm` and `input` sections. |
-| Wrong characters in the terminal | Edit `/etc/tarkin/console.env` (e.g. `XKB_DEFAULT_LAYOUT=us`), then `sudo systemctl restart tarkin-console`. |
-| Text too small or large | Edit `/etc/xdg/foot/foot.ini` (`font=monospace:size=14`). |
-| `pacman` cannot retrieve packages | Check the network first: `getent hosts mirror.archlinuxarm.org`, `ping 1.1.1.1`. |
-| Desktop does not start | It falls back to the terminal. Read `journalctl -u tarkin-console -b`, or run `sudo tarkin-session terminal`. |
+| `Cannot reach mirror.archlinuxarm.org` | ChromeOS has no internet, or the network filters it. Try a phone hotspot. |
+| Warning that packages could not be installed | Same cause. Fix the network and run the installer again, or there will be no terminal. |
+| "No valid image detected" | The firmware rejected the stick. `check-usb.sh` tells you why: wrong partition type, priority 0, bad signature, or `dev_boot_usb` at 0. |
+| It boots ChromeOS instead | You missed the menu, or `dev_boot_usb` is 0: `sudo crossystem dev_boot_usb=1 dev_boot_signed_only=0`. |
+| Freezes right after "jumping to kernel" | The kernel preamble flags were not 0. The installer and `set-cmdline.sh` use `--flags 0`, so run the installer again or `set-cmdline.sh --normal`. |
+| Back to the "OS verification is OFF" screen | The kernel started and died. Boot ChromeOS and run `check-usb.sh`, it prints the crash log. |
+| Black screen for 3 minutes | The terminal didn't start. Look at the `console journal`, `drm` and `input` sections of `tarkin-boot.log`. |
+| Wrong characters in the terminal | Edit `/etc/tarkin/console.env` (`XKB_DEFAULT_LAYOUT=us`), then `sudo systemctl restart tarkin-console`. |
+| Text too small or too big | Edit `/etc/xdg/foot/foot.ini` (`font=monospace:size=14`). |
+| `pacman` can't download | Check the network first: `getent hosts mirror.archlinuxarm.org`, `ping 1.1.1.1`. |
+| The desktop doesn't start | It falls back to the terminal. See `journalctl -u tarkin-console -b`, or run `sudo tarkin-session terminal`. |
 
-### Debugging the boot with `set-cmdline.sh`
+### Debugging the kernel command line
 
-`scripts/set-cmdline.sh` rewrites only the signed kernel of an installed stick, in VT2, without touching the rootfs:
+`scripts/set-cmdline.sh` rewrites only the signed kernel on an installed stick, from VT2, and leaves the rootfs alone:
 
 ```sh
 sudo bash scripts/set-cmdline.sh /dev/sda --probe
 ```
 
-| Mode | Effect |
-|---|---|
-| `--probe` | Mounts the root, runs `/bin/false` as init: deliberate panic and warm reset. The whole boot log is then in `/sys/fs/pstore/console-ramoops-0`. |
-| `--debug` | `rootdelay=20 panic=5`: panics instead of waiting forever if the root is missing. |
-| `--same` | Re-signs the stock kernel with its original command line (expects the stock dm-verity panic after about 4 s). |
-| `--normal` | Back to the default command line. |
+- `--probe` mounts the root and runs `/bin/false` as init, so the kernel panics on purpose and resets. The whole boot
+  log is then in `/sys/fs/pstore/console-ramoops-0`.
+- `--debug` uses `rootdelay=20 panic=5`: it panics instead of waiting forever if the root is missing.
+- `--same` signs the stock kernel again with its own command line. You should get the stock dm-verity panic after
+  about 4 seconds.
+- `--normal` goes back to the default command line.
 
-Only a warm reset keeps the pstore log. Holding Power or Refresh+Power wipes it. Do not run `--probe` or `--debug`
-and then hold Power.
+Only a warm reset keeps the pstore log. Holding Power or Refresh+Power wipes it, so after `--probe` or `--debug`
+don't hold the power button.
 
-To go back to normal: remove the stick and boot ChromeOS (`Ctrl+D`). To restore the firmware flags:
+To undo everything: remove the stick and boot ChromeOS (`Ctrl+D`). To put the firmware flags back:
 `sudo crossystem dev_boot_usb=0 dev_boot_signed_only=1`.
 
-## Repository layout
+## What's in the repository
 
-| Path | Purpose |
-|---|---|
-| `install/go.sh` | Guided launcher for VT2 (finds the tarball and the stick) |
-| `install/install-usb.sh` | The installer |
-| `scripts/preflight-tarkin.sh` | Read-only checks before installing |
-| `scripts/check-usb.sh` | Diagnoses a stick and the last failed boot |
-| `scripts/set-cmdline.sh` | Rewrites the kernel command line of an installed stick |
-| `scripts/install-desktop.sh` | Optional desktop installer, copied to `/home/alarm` by the installer |
-| `scripts/identify-device.sh` | Optional redacted hardware report (no HWID, serial or MAC) |
-| `rootfs/` | Files copied onto the stick: console service and launcher, `tarkin-wifi`, `tarkin-session`, seatd no-VT setting, no-suspend, panic reboot, boot report |
-| `notes/tarkin-findings.md` | What is verified on the device and what is not |
+- `install/go.sh`: guided launcher for VT2, finds the tarball and the stick
+- `install/install-usb.sh`: the installer
+- `scripts/preflight-tarkin.sh`: read-only checks before installing
+- `scripts/check-usb.sh`: diagnoses a stick and the last failed boot
+- `scripts/set-cmdline.sh`: rewrites the kernel command line of an installed stick
+- `scripts/install-desktop.sh`: the optional desktop (the installer copies it to `/home/alarm`)
+- `scripts/identify-device.sh`: optional hardware report with HWID, serial and MAC removed
+- `rootfs/`: files copied onto the stick (console service and launcher, `tarkin-wifi`, `tarkin-session`, seatd without
+  VT, no suspend, panic reboot, boot report)
+- `notes/tarkin-findings.md`: what has and hasn't been checked on the device
 
-## Security
+## Safety
 
-- Use a spare stick; never target `/dev/mmcblk0`. The installer refuses non-USB and non-removable disks and the running disk.
-- There is no network login: nothing listens for SSH. Set a password at install.
-- Developer Mode and `dev_boot_signed_only=0` weaken boot verification; restore the flags when you stop using USB boot.
-- Use it only on a device you own or are allowed to modify (a school-managed Chromebook may forbid Developer Mode).
-- Never publish HWIDs, serial numbers, MAC addresses, partition UUIDs, Wi-Fi credentials or GitHub tokens.
+- Use a spare stick. Never point the installer at `/dev/mmcblk0`; it refuses non-removable disks and the running disk.
+- Nothing listens for SSH. The only way in is the keyboard, so set a password during the install.
+- Developer Mode and `dev_boot_signed_only=0` weaken boot verification. Put the flags back when you stop using USB boot.
+- Only do this on a machine you own or may modify. A school-managed Chromebook may forbid Developer Mode.
+- Don't publish HWIDs, serial numbers, MAC addresses, partition UUIDs, Wi-Fi credentials or GitHub tokens.
 
-## Credits and license
+## Credits
 
-Derived from the Omarchy/Arch Linux ARM Chromebook CM14 project by zoan37 and contributors, reduced to the Tarkin USB
-boot path. The no-VT seatd approach follows that project's work on another Skywalker variant. MIT license, see
-[`LICENSE`](LICENSE).
+Based on zoan37's Omarchy / Arch Linux ARM Chromebook CM14 project, cut down to the Tarkin USB boot. The seatd
+without VT idea comes from that project's work on another Skywalker variant. MIT license, see [`LICENSE`](LICENSE).
