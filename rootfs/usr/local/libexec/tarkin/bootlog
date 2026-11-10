@@ -1,7 +1,4 @@
 #!/bin/bash
-# The stick can fail without anything visible. This plain-text report lets you diagnose a failed boot: boot
-# ChromeOS, plug the stick in, run scripts/check-usb.sh (it prints this file), or mount partition 2 and read
-# <root>/var/log/tarkin-boot.log.
 exec > /var/log/tarkin-boot.log.tmp 2>&1
 echo "== date";            date -u
 echo "== uname";           uname -a

@@ -1,7 +1,4 @@
 #!/bin/bash
-# check-usb.sh - diagnose an installed stick from ChromeOS (VT2, as root):   sudo bash scripts/check-usb.sh [/dev/sdX]
-# Read-only. Tells you whether the firmware will accept the stick, what the stick contains, and prints the crash
-# log of the last failed boot (ChromeOS keeps it in pstore).
 [[ $EUID -eq 0 ]] || { echo "Run as root:  sudo bash scripts/check-usb.sh" >&2; exit 1; }
 KERNEL_GUID="fe3a2a5d-4f32-41a7-b725-accc3285a309"
 bad=0

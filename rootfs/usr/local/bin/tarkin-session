@@ -1,0 +1,14 @@
+#!/bin/bash
+set -euo pipefail
+case "${1:-}" in desktop|terminal) ;; *) echo "Usage: sudo tarkin-session desktop|terminal" >&2; exit 1 ;; esac
+[[ $EUID -eq 0 ]] || { echo "Run it with sudo." >&2; exit 1; }
+f=/etc/tarkin/console.env
+mkdir -p /etc/tarkin
+touch "$f"
+if grep -q '^TARKIN_SESSION=' "$f"; then
+  sed -i "s/^TARKIN_SESSION=.*/TARKIN_SESSION=$1/" "$f"
+else
+  echo "TARKIN_SESSION=$1" >> "$f"
+fi
+echo "Session set to: $1. Restarting the display now (this window will close)..."
+systemctl --no-block restart tarkin-console.service

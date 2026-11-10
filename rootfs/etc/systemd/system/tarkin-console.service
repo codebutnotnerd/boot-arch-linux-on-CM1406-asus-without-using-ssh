@@ -1,18 +1,1 @@
-[Unit]
-Description=On-screen terminal on the built-in display (no VT on the ChromeOS kernel)
-Requires=seatd.service
-After=seatd.service systemd-user-sessions.service
 
-[Service]
-User=alarm
-# A logind session for alarm (creates /run/user/1000), placed on seat0 directly because there is no VT.
-PAMName=login
-Environment=XDG_SEAT=seat0 XDG_SESSION_TYPE=wayland XDG_SESSION_CLASS=user
-ExecStart=/usr/local/libexec/tarkin/console
-Restart=always
-RestartSec=3
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target

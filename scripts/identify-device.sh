@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
-# identify-device.sh - read-only device identification for the ASUS CM1406 (Skywalker / Tarkin).
-# Run as root in the ChromeOS developer shell (crosh -> shell). Read-only: writes only to $OUT.
-# No HWID, serial number or MAC address is collected.
 set -uo pipefail
 OUT="${OUT:-$HOME/tarkin-report}"
 mkdir -p "$OUT"
@@ -31,7 +28,6 @@ KERN_A="${P}$((ROOT_NUM - 1))"
   ls /sys/class/drm 2>/dev/null
 } > "$OUT/report.txt" 2>&1
 
-# Stock kernel FIT: DTB(s) and the compatible strings Depthcharge matches against.
 dd if="$KERN_A" of="$OUT/kern_a.bin" bs=1M 2>/dev/null
 if command -v futility >/dev/null 2>&1; then
   futility vbutil_kernel --get-vmlinuz "$OUT/kern_a.bin" --vmlinuz-out "$OUT/stock.fit" >/dev/null 2>&1 || true
@@ -39,7 +35,6 @@ fi
 if [[ -s "$OUT/stock.fit" ]] && command -v dumpimage >/dev/null 2>&1; then
   dumpimage -l "$OUT/stock.fit" > "$OUT/stock-fit-layout.txt" 2>&1 || true
 fi
-# Running device tree, decompiled (always works, no extra tools beyond dtc)
 if command -v dtc >/dev/null 2>&1; then
   dtc -I fs -O dts -o "$OUT/running.dts" /proc/device-tree 2>/dev/null || true
   sed -i -E '/hardware-id|hwid|serial-number|bootargs|kern_guid|mac-address/d' "$OUT/running.dts" 2>/dev/null || true

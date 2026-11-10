@@ -13,7 +13,7 @@ partition UUID, serial number, MAC) is reproduced here. "Seen in the DT" means n
 | Storage | **eMMC** `mmcblk0` (116 GB), no active UFS; p1 STATE (encrypted), p2/p4 kernels 32 MB, p3/p5 roots 4 GB, p12 EFI 64 MB |
 | Slot | Root on `mmcblk0p5` -> active kernel on `p4` (KERN-B) |
 | Stock kernel | ~14 MB FIT containing `mt8189-skywalker-tarkin.dtb` and the overlays `tarkin-touchscreen`, `tarkin-kb-cm1406`, `tarkin-kb-cm1406-backlight`, `tarkin-ca-kb-cm1406`, `tarkin-ca-kb-cm1406-backlight` (and cm1405/cm1505 variants) |
-| Repack | `futility vbutil_kernel --repack` with the devkeys: exit 0, "Body verification succeeded", flags 0x1 |
+| Repack | `futility vbutil_kernel --repack` with the devkeys: exit 0, "Body verification succeeded", flags 0 (0x1 froze the boot on this board) |
 | Panel | EDID manufacturer `CSW`, product `0x143f`; modes 1920x1200 and 1600x1200 |
 | Audio | ALSA card `mt8189_rt5650` |
 | Input | `cros_ec`, `cros_ec_buttons`, `gpio-keys`, `hid-over-i2c 04F3:31C6 Touchpad`, headset/DP/HDMI jacks; no touchscreen listed |
@@ -33,7 +33,16 @@ partition UUID, serial number, MAC) is reproduced here. "Seen in the DT" means n
 
 ## Not established
 
-- An actual boot from the USB stick (the installer reuses the stock kernel and its own device tree).
 - The exact audio codec and amplifier (only the card name `mt8189_rt5650` is known) and a matching UCM profile.
-- Display, GPU, audio, touchpad and suspend under Arch Linux ARM.
-- The on-screen terminal: that mediatek-drm drives the Tarkin eDP panel (CSW, 1920x1200) from userspace without fbcon, and that the `cros_ec` keyboard works through libinput under seatd without a VT.
+- Audio, touchpad, suspend and the labwc desktop under Arch Linux ARM.
+- GPU integration with the compositor (the Mali libraries pass standalone EGL, framebuffer and DMA-BUF tests only).
+
+## First successful boot (2026-11-10)
+
+- The Tarkin froze silently right after depthcharge printed "jumping to kernel" when the repacked kernel had
+  preamble `--flags 0x1`. Re-signing with `--flags 0` (same as the stock kernel) boots: ext4 root mounted r/w,
+  PID 1 started, `cage` + `foot` terminal appears on the built-in screen.
+- Method that found it: write the unmodified stock kernel to the stick (it panics on dm-verity after ~4 s, proving the
+  USB path works), then re-sign it step by step with `scripts/set-cmdline.sh` (`--same`, `--probe`, `--normal`). A warm
+  reset after a kernel panic keeps `/sys/fs/pstore/console-ramoops-0`; holding Power wipes it.
+- Confirmed working afterwards: on-screen terminal, built-in keyboard, Wi-Fi (MT7925) and pacman.

@@ -1,11 +1,4 @@
 #!/bin/bash
-# install-usb.sh - Arch Linux ARM on a USB stick for the ASUS Chromebook CM1406 (Google Tarkin, MT8189).
-#
-# Run on the Chromebook itself, in ChromeOS Developer Mode (VT2), as root.
-# The stock ChromeOS kernel of the running slot is re-signed with the developer keys and written to the stick,
-# so the board's own device tree is used. The internal eMMC is never written.
-# LOCAL CONSOLE VARIANT: no SSH. The system starts a terminal (cage + foot, software rendering) straight on the
-# built-in display and uses the built-in keyboard.
 set -euo pipefail
 
 DEV=""
@@ -15,17 +8,11 @@ USER_PASS=""
 WIFI_SSID="${WIFI_SSID:-}"
 WIFI_PASS="${WIFI_PASS:-}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MNT="/usr/local/tarkin_alarm_root"          # stateful partition: / and /tmp on ChromeOS are too small
+MNT="/usr/local/tarkin_alarm_root"
 WORK="/var/tmp"
 ARCHIVE_TMP=""
 KERNEL_TMP_DIR=""
 
-# The kernel command line is the contract between this installer and the stock kernel:
-#   console=            no console (the stock kernel has no VT/fbcon, the screen stays black)
-#   root=...PARTNROFF=1 root is the partition right after the kernel partition (p1 -> p2)
-#   net.ifnames=0       keep the interface name wlan0
-#   lsm=...             drop LoadPin (pins module/firmware loading to the verity root), the chromiumos LSM and
-#                       SELinux (no policy in Arch); keep landlock/yama/bpf
 CMDLINE='console= loglevel=7 init=/sbin/init root=PARTUUID=%U/PARTNROFF=1 rootwait rw noinitrd net.ifnames=0 lsm=capability,landlock,yama,bpf cpuidle.governor=teo irqchip.gicv3_pseudo_nmi=1'
 
 cleanup() {
@@ -42,7 +29,6 @@ cleanup() {
 trap cleanup EXIT
 
 die() { echo "[-] $*" >&2; exit 1; }
-# Never hang forever on a slow or filtered server: connect timeout, retries, and abort when the speed stalls.
 CURL_OPTS=(--fail --location --show-error --connect-timeout 20 --retry 3 --retry-delay 3 --speed-time 45 --speed-limit 2000)
 
 while [[ $# -gt 0 ]]; do
@@ -79,17 +65,14 @@ done
 
 echo "=== Target: ASUS Chromebook CM1406 (Google Tarkin, MT8189) ==="
 
-# This installer only works from ChromeOS: it repacks the running stock kernel.
 command -v rootdev >/dev/null 2>&1 || die "rootdev not found: run this on the Chromebook, in ChromeOS Developer Mode."
 
-# Board check.
 if [[ "${FORCE_BOARD:-0}" != 1 ]]; then
   compat="$(tr '\0' ' ' < /proc/device-tree/compatible 2>/dev/null || true)"
   [[ "$compat" == *google,tarkin* ]] \
     || die "This is not a google,tarkin board (compatible: ${compat:-unreadable}). Set FORCE_BOARD=1 to override."
 fi
 
-# Target safety: removable USB device, never the disk ChromeOS is running from, never eMMC.
 name="$(basename "$DEV")"
 [[ "$DEV" =~ mmcblk ]] && die "$DEV looks like internal eMMC. This installer only targets USB drives."
 [[ -d "/sys/block/$name" ]] || die "$DEV is not a whole disk. Pass the device (e.g. /dev/sda), not a partition."
@@ -107,7 +90,6 @@ KB=/usr/share/vboot/devkeys/kernel.keyblock
 SK=/usr/share/vboot/devkeys/kernel_data_key.vbprivk
 [[ -f "$KB" && -f "$SK" ]] || die "ChromeOS developer signing keys are missing ($KB, $SK)."
 
-# Stock kernel of the running slot: root on p3 -> kernel p2 (KERN-A), root on p5 -> kernel p4 (KERN-B).
 running_disk="$(rootdev -s -d)"
 running_root="$(rootdev -s)"
 root_num="${running_root##*[!0-9]}"
@@ -120,7 +102,6 @@ KVER="$(uname -r)"
 [[ -d "/lib/modules/$KVER" ]] || die "ChromeOS kernel modules not found in /lib/modules/$KVER."
 [[ -d /lib/firmware ]]        || die "ChromeOS firmware directory /lib/firmware not found."
 
-# Root filesystem archive (verified before anything is erased).
 ARCHIVE="$ALARM_SOURCE"
 if [[ "$ALARM_SOURCE" =~ ^https:// ]]; then
   ARCHIVE_TMP="$(mktemp -d "$WORK/alarm-dl.XXXXXX")"
@@ -140,7 +121,6 @@ expected_md5="$(awk 'NR == 1 { print $1 }' "$ARCHIVE.md5" | tr '[:upper:]' '[:lo
 actual_md5="$(md5sum "$ARCHIVE" | awk '{ print $1 }')"
 [[ "$actual_md5" == "$expected_md5" ]] || die "Rootfs checksum mismatch; refusing to erase the USB drive."
 
-# Wi-Fi: use the network saved in ChromeOS unless one is given.
 if [[ -z "$WIFI_SSID" && -f /var/cache/shill/default.profile ]]; then
   echo "== Reading the saved Wi-Fi network from ChromeOS..."
   prof=/var/cache/shill/default.profile
@@ -165,15 +145,12 @@ if [[ -n "$WIFI_SSID" ]]; then
   [[ -z "${WIFI_COUNTRY:-}" || "$WIFI_COUNTRY" =~ ^[A-Z]{2}$ ]] || die "WIFI_COUNTRY must be two capital letters, e.g. FR."
 fi
 
-# The Wi-Fi tools are installed from the Arch Linux ARM mirror inside a chroot: check that network works NOW,
-# before the stick is erased, so a missing connection does not produce a stick that boots but cannot be reached.
 if [[ "${ALLOW_NO_PKGS:-0}" != 1 ]]; then
   echo "== Checking network access to the Arch Linux ARM package mirror..."
   curl -sSI --connect-timeout 15 --max-time 30 http://mirror.archlinuxarm.org/aarch64/core/core.db >/dev/null 2>&1 \
     || die "Cannot reach mirror.archlinuxarm.org from this shell. Check that ChromeOS has internet (Wi-Fi connected), try another network (a phone hotspot), or set ALLOW_NO_PKGS=1 to install without Wi-Fi tools (the stick then has no on-screen terminal)."
 fi
 
-# Password of the local user (there is no SSH: this is the account you type in on the keyboard).
 if [[ -t 0 ]]; then
   read -r -s -p "Password for the user 'alarm' (empty keeps the default, 'alarm'): " USER_PASS; echo
   if [[ -n "$USER_PASS" ]]; then
@@ -192,13 +169,12 @@ if [[ "${CONFIRM_ERASE:-}" != "$DEV" ]]; then
   [[ "$confirmation" == "$DEV" ]] || die "Confirmation did not match; aborting."
 fi
 
-# Build and verify the signed kernel BEFORE touching the stick.
 echo "== Repacking the stock kernel with the developer keys..."
 KERNEL_TMP_DIR="$(mktemp -d "$WORK/tarkin-kernel.XXXXXX")"
 dd if="$part_kern" of="$KERNEL_TMP_DIR/stock.bin" bs=1M status=none
 printf '%s\n' "$CMDLINE" > "$KERNEL_TMP_DIR/cmdline"
 futility vbutil_kernel --repack "$KERNEL_TMP_DIR/kernel.bin" --oldblob "$KERNEL_TMP_DIR/stock.bin" \
-  --keyblock "$KB" --signprivate "$SK" --config "$KERNEL_TMP_DIR/cmdline" --flags 0x1
+  --keyblock "$KB" --signprivate "$SK" --config "$KERNEL_TMP_DIR/cmdline" --flags 0
 futility vbutil_kernel --verify "$KERNEL_TMP_DIR/kernel.bin"
 (( $(stat -c %s "$KERNEL_TMP_DIR/kernel.bin") <= 64 * 1024 * 1024 )) || die "Signed kernel exceeds the 64 MiB kernel partition."
 
@@ -207,31 +183,52 @@ crossystem dev_boot_usb=1 dev_boot_signed_only=0
 [[ "$(crossystem dev_boot_usb)" == 1 && "$(crossystem dev_boot_signed_only)" == 0 ]] \
   || die "crossystem did not enable USB boot of developer-signed kernels."
 
+unmount_all() {
+  local p i
+  for p in "$DEV"?*; do
+    [[ -b "$p" ]] || continue
+    for i in 1 2 3; do
+      findmnt -rn -S "$p" >/dev/null 2>&1 || break
+      umount "$p" 2>/dev/null || umount -l "$p" 2>/dev/null || sleep 1
+    done
+    ! findmnt -rn -S "$p" >/dev/null 2>&1 \
+      || die "Cannot unmount $p. Eject the stick in the Files app (or close what uses it) and run again."
+  done
+}
 echo "== Unmounting existing partitions on $DEV..."
-for p in "$DEV"?*; do
-  [[ -b "$p" ]] || continue
-  findmnt -rn -S "$p" >/dev/null 2>&1 && umount "$p"
-done
+unmount_all
 
 echo "== Partitioning $DEV (ChromeOS GPT: p1 kernel, p2 root)..."
 total_sectors="$(blockdev --getsz "$DEV")"
-(( total_sectors > 139264 + 2097152 )) || die "USB device is too small (need at least ~1 GiB for the root partition; 8 GiB+ recommended)."
+(( total_sectors > 139264 + 8 * 2097152 )) || die "USB device is too small (the root filesystem needs about 3 GiB free after extraction; 8 GiB or more is required, 16 GiB recommended)."
 cgpt create "$DEV"
 cgpt boot -p "$DEV"
 cgpt add -i 1 -t kernel -b 8192 -s 131072 -l KERN-A -S 1 -T 1 -P 15 "$DEV"
 cgpt add -i 2 -t data -b 139264 -s $((total_sectors - 139264 - 2048)) -l ALARM "$DEV"
-blockdev --rereadpt "$DEV" || { echo "[!] Partition table reread failed; waiting."; sleep 3; }
-udevadm settle 2>/dev/null || sleep 2
-cgpt show "$DEV"
-
 part1="${DEV}1"; part2="${DEV}2"
 [[ "$DEV" =~ [0-9]$ ]] && { part1="${DEV}p1"; part2="${DEV}p2"; }
+expected2=$((total_sectors - 139264 - 2048))
+size2=0
+for i in 1 2 3 4 5; do
+  blockdev --rereadpt "$DEV" 2>/dev/null || true
+  udevadm settle 2>/dev/null || sleep 2
+  size2="$(blockdev --getsz "$part2" 2>/dev/null || echo 0)"
+  (( size2 >= expected2 - 4096 )) && break
+  unmount_all
+  sleep 2
+done
+cgpt show "$DEV"
 [[ -b "$part1" && -b "$part2" ]] || die "Partition device nodes did not appear for $DEV."
+(( size2 >= expected2 - 4096 )) \
+  || die "The kernel still sees the OLD partition table ($part2 is $size2 sectors, expected about $expected2). Nothing was written to it. Unplug the stick, plug it in again WITHOUT opening the Files app, then run the installer again."
 
 echo "== Formatting $part2 as ext4 (label ALARM)..."
+unmount_all
 mkfs.ext4 -F -L ALARM "$part2"
 mkdir -p "$MNT"
 mount "$part2" "$MNT"
+avail_kb="$(df -Pk "$MNT" | awk 'NR==2 {print $4}')"
+(( avail_kb >= 3 * 1048576 )) || die "Only $((avail_kb / 1024)) MiB free on the new root filesystem (need 3 GiB). Unplug and replug the stick, then run the installer again."
 
 echo "== Extracting the Arch Linux ARM rootfs..."
 bsdtar -xpf "$ARCHIVE" -C "$MNT"
@@ -243,28 +240,26 @@ echo "== Installing Tarkin configuration..."
 printf 'PARTUUID=%s / ext4 defaults,noatime 0 1\n' "$ROOT_PARTUUID" > "$MNT/etc/fstab"
 echo "asus-cm1406" > "$MNT/etc/hostname"
 cp -R --no-preserve=ownership "$REPO_ROOT/rootfs/." "$MNT/"
-# Overlay files: root-owned, config 644, scripts 755.
 ( cd "$REPO_ROOT/rootfs" && find . -type f ) | while read -r f; do
   chown 0:0 "$MNT/$f"
   case "$f" in ./usr/local/bin/*|./usr/local/libexec/*) chmod 755 "$MNT/$f" ;; *) chmod 644 "$MNT/$f" ;; esac
 done
-# Keyboard layout of the on-screen terminal.
+if [[ -d "$MNT/home/alarm" ]]; then
+  install -m 755 "$REPO_ROOT/scripts/install-desktop.sh" "$MNT/home/alarm/install-desktop.sh"
+  chown 1000:1000 "$MNT/home/alarm/install-desktop.sh"
+fi
 mkdir -p "$MNT/etc/tarkin"
 printf 'XKB_DEFAULT_LAYOUT=%s\n' "$KEYMAP" > "$MNT/etc/tarkin/console.env"
 chmod 644 "$MNT/etc/tarkin/console.env"
-# Lingering: /run/user/1000 exists for the console session from the start of the boot.
 mkdir -p "$MNT/var/lib/systemd/linger"; : > "$MNT/var/lib/systemd/linger/alarm"
 
-# Persistent journal.
 mkdir -p "$MNT/var/log/journal"
 
-# Kernel modules and firmware come from ChromeOS: they match the stock kernel that will boot.
 echo "== Copying ChromeOS kernel modules ($KVER) and firmware..."
 mkdir -p "$MNT/usr/lib/modules" "$MNT/usr/lib/firmware/updates"
 cp -a "/lib/modules/$KVER" "$MNT/usr/lib/modules/"
 cp -a /lib/firmware/. "$MNT/usr/lib/firmware/updates/"
 
-# MT7925 (PCIe 14c3:7925) Wi-Fi/Bluetooth firmware: present in ChromeOS normally; fetch what is missing.
 FW_DIR="$MNT/usr/lib/firmware/updates/mediatek/mt7925"
 mkdir -p "$FW_DIR"
 FW_URL="https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/mediatek/mt7925"
@@ -276,7 +271,6 @@ for blob in WIFI_MT7925_PATCH_MCU_1_1_hdr.bin WIFI_RAM_CODE_MT7925_1_1.bin BT_RA
   fi
 done
 
-# Networking: systemd-networkd + wpa_supplicant.
 mkdir -p "$MNT/etc/systemd/network"
 cat > "$MNT/etc/systemd/network/wlan.network" <<'EOF'
 [Match]
@@ -305,7 +299,6 @@ if [[ -n "$WIFI_SSID" ]]; then
   chmod 600 "$WPA_CONF"
 fi
 
-# The Arch Linux ARM tarball has no Wi-Fi tools: install them in a chroot (same architecture, runs natively).
 echo "== Installing the terminal (cage, foot, seatd), Wi-Fi tools and sudo in the new rootfs (chroot, needs network)..."
 mount --bind /proc "$MNT/proc"; mount --bind /sys "$MNT/sys"; mount --bind /dev "$MNT/dev"
 mount -t tmpfs tmpfs "$MNT/tmp"
@@ -314,13 +307,12 @@ if [[ -e "$MNT/etc/resolv.conf" || -L "$MNT/etc/resolv.conf" ]]; then
   mv "$MNT/etc/resolv.conf" "$MNT/etc/resolv.conf.orig"; resolv_saved=1
 fi
 cp /etc/resolv.conf "$MNT/etc/resolv.conf" || true
-printf 'nameserver 1.1.1.1\nnameserver 9.9.9.9\n' >> "$MNT/etc/resolv.conf"   # fallback if ChromeOS uses a local-only resolver
+printf 'nameserver 1.1.1.1\nnameserver 9.9.9.9\n' >> "$MNT/etc/resolv.conf"
 PKG_OK=1
 chroot "$MNT" /bin/bash -c 'pacman-key --init >/dev/null 2>&1 && pacman-key --populate archlinuxarm >/dev/null 2>&1 && pacman -Syu --noconfirm --needed wpa_supplicant iw pciutils seatd cage foot foot-terminfo ttf-dejavu sudo nano' \
   || { PKG_OK=0; echo "[!] Package install failed (no network from this shell?)." >&2; }
 [[ -x "$MNT/usr/bin/wpa_supplicant" && -x "$MNT/usr/bin/cage" && -x "$MNT/usr/bin/foot" && -x "$MNT/usr/bin/seatd" ]] || PKG_OK=0
 
-# Local account: input/video/render groups (existing ones only), sudo for wheel, chosen password, root locked.
 if [[ -x "$MNT/usr/bin/usermod" ]]; then
   for g in video input render audio seat seatd wheel; do
     chroot "$MNT" getent group "$g" >/dev/null 2>&1 && chroot "$MNT" usermod -aG "$g" alarm || true
@@ -334,7 +326,6 @@ if [[ -x "$MNT/usr/bin/usermod" ]]; then
   fi
 fi
 
-# Replace the cleartext passphrase by a hashed PSK (ChromeOS has no python3, wpa_passphrase comes from the chroot).
 if [[ -n "$WIFI_SSID" && -x "$MNT/usr/bin/wpa_passphrase" ]]; then
   hashed="$(printf '%s\n' "$WIFI_PASS" | chroot "$MNT" /usr/bin/wpa_passphrase "$WIFI_SSID" 2>/dev/null | sed -n 's/^[[:space:]]*psk=\([0-9a-f]\{64\}\)$/\1/p')" || hashed=""
   if [[ "$hashed" =~ ^[0-9a-f]{64}$ ]]; then
@@ -357,10 +348,9 @@ for d in tmp dev sys proc; do
   mountpoint -q "$MNT/$d" && umount "$MNT/$d" || true
 done
 
-# Enable services offline.
 WANTS="$MNT/etc/systemd/system/multi-user.target.wants"
 mkdir -p "$WANTS" "$MNT/etc/systemd/system/timers.target.wants"
-enable_unit() {   # enable_unit <unit-file-in-rootfs> <wants-dir> [link-name]
+enable_unit() {
   local unit="$1" dir="$2" link="${3:-$(basename "$1")}"
   if [[ -f "$MNT$unit" ]]; then ln -sfn "$unit" "$dir/$link"; else echo "[!] Unit unavailable in the rootfs: $unit" >&2; fi
 }
@@ -378,7 +368,6 @@ echo "== Writing the signed kernel to $part1..."
 dd if="$KERNEL_TMP_DIR/kernel.bin" of="$part1" bs=1M conv=fsync status=progress
 sync
 
-# Read the kernel back from the stick and verify it, so a bad write is caught here and not at boot.
 echo "== Verifying what was written to $part1..."
 ksize="$(stat -c %s "$KERNEL_TMP_DIR/kernel.bin")"
 dd if="$part1" of="$KERNEL_TMP_DIR/readback.bin" bs=1M count=$(( (ksize + 1048575) / 1048576 )) status=none
@@ -407,6 +396,7 @@ Boot it:
  2. At the 'OS verification is OFF' screen press Ctrl+U.
  3. Wait 1-2 minutes: a terminal should appear on the screen (the firmware logo may stay up for a while).
     Log in is automatic as 'alarm'; use  sudo  for administration and  sudo tarkin-wifi "Network"  for Wi-Fi.
+    Optional desktop (Wi-Fi first):  bash ~/install-desktop.sh  then  sudo tarkin-session desktop
     If the screen stays black or frozen on the logo for 3 minutes, this experimental console did not start:
     power off, then see README, "Troubleshooting".
 

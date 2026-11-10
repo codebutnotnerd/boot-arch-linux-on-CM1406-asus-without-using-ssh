@@ -1,7 +1,4 @@
 #!/bin/bash
-# preflight-tarkin.sh - read-only checks before running install/install-usb.sh.
-# Run as root in the ChromeOS developer shell. Writes only to /var/tmp/pf. Report: /var/tmp/pf/report.txt
-# Any line containing MISSING, ABSENT or FAILED must be fixed before installing.
 set -u
 [[ $EUID -eq 0 ]] || { echo "Run as root (sudo)." >&2; exit 1; }
 O=/var/tmp/pf
@@ -60,7 +57,7 @@ if [[ -b "$pk" && -f "$KB" && -f "$SK" ]]; then
   echo "read: $(stat -c %s "$O/stock.bin") bytes"
   printf '%s\n' "$CMDLINE" > "$O/cmdline"
   futility vbutil_kernel --repack "$O/test-kernel.bin" --oldblob "$O/stock.bin" \
-    --keyblock "$KB" --signprivate "$SK" --config "$O/cmdline" --flags 0x1
+    --keyblock "$KB" --signprivate "$SK" --config "$O/cmdline" --flags 0
   rc=$?
   [[ $rc -eq 0 ]] && echo "repack: OK" || echo "repack: FAILED (exit $rc)"
   futility vbutil_kernel --verify "$O/test-kernel.bin" 2>&1 | sed -n '/Flags/p;/Body verification/p;/^Config:/,$p'
@@ -69,8 +66,8 @@ else
 fi
 
 echo "## network"
-curl -sI --max-time 20 https://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz.md5 2>&1 | head -1 | grep -q ' 200' \
-  && echo "archlinuxarm.org: OK" || echo "archlinuxarm.org: FAILED (no network?)"
+curl -sIL --max-time 20 https://mirror.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz.md5 2>&1 | grep -q "^HTTP.* 200" \
+  && echo "mirror.archlinuxarm.org: OK" || echo "mirror.archlinuxarm.org: FAILED (no network?)"
 
 echo "## block devices (plug the USB stick in first)"
 lsblk -o NAME,SIZE,RM,TRAN,TYPE,MODEL 2>&1 | grep -v -E '^(loop|zram)|[ `|]-?[0-9a-f]{20,}'
