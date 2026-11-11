@@ -222,5 +222,6 @@ To undo everything: remove the stick and boot ChromeOS (`Ctrl+D`). To put the fi
 
 ## Credits
 
-Based on zoan37's Omarchy / Arch Linux ARM Chromebook CM14 project, cut down to the Tarkin USB boot. The seatd
-without VT idea comes from that project's work on another Skywalker variant. MIT license, see [`LICENSE`](LICENSE).
+Based on zoan37's Omarchy / Arch Linux ARM Chromebook CM14 project, adapted specifically for USB boot on the Tarkin variant. The seatd-based, VT-less startup approach builds on that project's work for another Skywalker variant.
+
+Original contributions in this repository are All Rights Reserved. Third-party components and reused upstream work remain subject to their respective licenses. See [`LICENSE`](LICENSE).
