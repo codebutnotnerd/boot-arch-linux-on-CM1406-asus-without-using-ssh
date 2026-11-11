@@ -1,4 +1,4 @@
-# Arch Linux ARM on the ASUS Chromebook CM1406 (no SSH)
+# Arch Linux ARM on the ASUS Chromebook CM1406 
 
 This boots Arch Linux ARM from a USB stick on the ASUS Chromebook CM1406 (board `google,tarkin`, MediaTek MT8189,
 eMMC). ChromeOS stays on the internal storage and is never touched. Unplug the stick and the machine boots ChromeOS
