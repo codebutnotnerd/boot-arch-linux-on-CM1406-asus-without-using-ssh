@@ -44,7 +44,7 @@ printf '%s\n' "$CMDLINE" > "$T/cmdline"
 CFG=(--config "$T/cmdline")
 [[ "$MODE" == --same ]] && CFG=()
 futility vbutil_kernel --repack "$T/kernel.bin" --oldblob "$T/stock.bin" \
-  --keyblock "$KB" --signprivate "$SK" "${CFG[@]}" --flags 0
+  --keyblock "$KB" --signprivate "$SK" ${CFG[@]+"${CFG[@]}"} --flags 0
 futility vbutil_kernel --verify "$T/kernel.bin" >/dev/null || die "New kernel does not verify; stick not touched."
 
 for p in "$DEV"?*; do

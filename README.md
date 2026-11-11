@@ -164,6 +164,7 @@ It checks the firmware flags, the partition table, the kernel signature and the 
 | `sudo` fails in the `Ctrl+Alt+T` terminal | Normal. Use VT2. |
 | Can't log in on VT2 | The user is `chronos`. |
 | Wrong characters in VT2 | VT2 is QWERTY. |
+| ChromeOS reboots by itself during `go.sh` | Fixed: the package step now runs in an isolated chroot (own mount/pid namespace, read-only `/proc/sys`), risky pacman hooks are masked, and the host's panic/vm settings are restored. The full log is in `/var/tmp/tarkin-install.log`; if it still happens, boot ChromeOS again and send that file plus `ls /sys/fs/pstore`. |
 | `go.sh` finds no USB stick | Replug, wait 5 s, try another port (no hub) or another stick. `dmesg \| tail` should show `sd 0:0:0:0: [sda]`. |
 | `curl` hangs on the rootfs | Download it with the browser (step 1) and put it in `/var/tmp`. |
 | `Cannot reach mirror.archlinuxarm.org` | ChromeOS has no internet, or the network filters it. Try a phone hotspot. |
@@ -202,7 +203,7 @@ To undo everything: remove the stick and boot ChromeOS (`Ctrl+D`). To put the fi
 ## What's in the repository
 
 - `install/go.sh`: guided launcher for VT2, finds the tarball and the stick
-- `install/install-usb.sh`: the installer
+- `install/install-usb.sh`: the installer (logs to `/var/tmp/tarkin-install.log`)
 - `scripts/preflight-tarkin.sh`: read-only checks before installing
 - `scripts/check-usb.sh`: diagnoses a stick and the last failed boot
 - `scripts/set-cmdline.sh`: rewrites the kernel command line of an installed stick
@@ -222,6 +223,5 @@ To undo everything: remove the stick and boot ChromeOS (`Ctrl+D`). To put the fi
 
 ## Credits
 
-Based on zoan37's Omarchy / Arch Linux ARM Chromebook CM14 project, adapted specifically for USB boot on the Tarkin variant. The seatd-based, VT-less startup approach builds on that project's work for another Skywalker variant.
-
-Original contributions in this repository are All Rights Reserved. Third-party components and reused upstream work remain subject to their respective licenses. See [`LICENSE`](LICENSE).
+Based on zoan37's Omarchy / Arch Linux ARM Chromebook CM14 project, cut down to the Tarkin USB boot. The seatd
+without VT idea comes from that project's work on another Skywalker variant. MIT license, see [`LICENSE`](LICENSE).

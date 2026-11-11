@@ -48,4 +48,4 @@ echo "ALL DATA ON $DEV WILL BE ERASED."
 read -r -p "Type the device name again to confirm ($DEV): " confirm
 [[ "$confirm" == "$DEV" ]] || { echo "[-] Confirmation did not match. Aborting." >&2; exit 1; }
 
-exec env CONFIRM_ERASE="$DEV" bash "$HERE/install-usb.sh" "${ALARM_ARGS[@]}" "$@" "$DEV"
+exec env CONFIRM_ERASE="$DEV" bash "$HERE/install-usb.sh" ${ALARM_ARGS[@]+"${ALARM_ARGS[@]}"} "$@" "$DEV"

@@ -15,7 +15,7 @@ echo "kernel: $(uname -r)"
 echo "mainfw_type: $(crossystem mainfw_type 2>&1)"
 
 echo "## tools"
-for c in cgpt futility bsdtar mkfs.ext4 blockdev blkid dd findmnt mountpoint chroot mount umount md5sum curl crossystem rootdev lsblk; do
+for c in cgpt futility bsdtar mkfs.ext4 blockdev blkid dd findmnt mountpoint chroot unshare mount umount md5sum curl crossystem rootdev lsblk; do
   printf '%s: ' "$c"; command -v "$c" || echo MISSING
 done
 

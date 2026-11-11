@@ -1,23 +1,32 @@
-# All Rights Reserved
+MIT License
 
-Copyright (c) 2026 zoan37 and asus-cm14-chromebook-omarchy contributors.
+Copyright (c) 2026 codebutnotnerd
+Copyright (c) 2026 zoan37 and asus-cm14-chromebook-omarchy contributors
 
-All rights reserved.
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-This repository and all of its original contents, including source code, scripts, documentation, configuration files, designs and other materials, are protected by copyright.
+The above copyright notices and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-No permission or license is granted to any person to:
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
-- Copy or reproduce this work or any substantial part of it.
-- Modify, adapt or create derivative works from it.
-- Redistribute, publish or distribute it.
-- Sell, sublicense or use it commercially.
-- Present this work, or any part of it, as their own creation.
+ADDITIONAL NOTICE (not a license condition)
 
-Any use beyond viewing the repository through its hosting platform requires prior written permission from the relevant copyright holder.
+These scripts modify firmware boot settings, partitions and the kernel of a
+Chromebook. Misuse can erase data or make the device unbootable. Use them only
+on a device you own or are allowed to modify, and at your own risk.
 
-Copyright and author attribution notices must not be removed, modified or falsified.
-
-Third-party components remain subject to their respective licenses.
-
-This project is provided "AS IS", without warranty of any kind, express or implied.
+Third-party components (Arch Linux ARM, the Linux kernel, cage, foot, seatd,
+wpa_supplicant, ChromeOS vboot tools, firmware blobs, etc.) are not covered by
+this license and remain under their own respective licenses.

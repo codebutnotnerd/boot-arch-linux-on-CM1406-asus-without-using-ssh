@@ -1,1 +1,7 @@
+[Unit]
+Description=Write a boot report to /var/log/tarkin-boot.log
+After=multi-user.target tarkin-console.service
 
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/tarkin/bootlog

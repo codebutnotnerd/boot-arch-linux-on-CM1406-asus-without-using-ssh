@@ -15,7 +15,70 @@ KERNEL_TMP_DIR=""
 
 CMDLINE='console= loglevel=7 init=/sbin/init root=PARTUUID=%U/PARTNROFF=1 rootwait rw noinitrd net.ifnames=0 lsm=capability,landlock,yama,bpf cpuidle.governor=teo irqchip.gicv3_pseudo_nmi=1'
 
+# --- Host protection --------------------------------------------------------------------------
+# The package step runs Arch's pacman hooks. Those hooks (systemd-sysctl, binfmt, tmpfiles, ...)
+# act on whatever /proc and /sys they see. If the chroot shares ChromeOS's /proc they change the
+# RUNNING ChromeOS (sysctl, panic settings...), which is what made the Chromebook reboot by itself.
+# So: (1) the chroot runs in its own mount+pid namespace with /proc, /sys read-only,
+#     (2) the risky hooks are masked while installing, (3) kernel panic/vm settings are restored.
+SAVED_SYSCTL=()
+save_sysctl() {
+  local f
+  for f in kernel/panic kernel/panic_on_oops kernel/panic_on_warn kernel/softlockup_panic \
+           kernel/hung_task_panic kernel/watchdog vm/dirty_bytes vm/dirty_background_bytes \
+           vm/dirty_ratio vm/dirty_background_ratio vm/swappiness vm/overcommit_memory; do
+    [[ -r /proc/sys/$f ]] && SAVED_SYSCTL+=("$f=$(cat /proc/sys/$f)")
+  done
+}
+restore_sysctl() {
+  local kv f v
+  for kv in "${SAVED_SYSCTL[@]:-}"; do
+    [[ -n "$kv" ]] || continue
+    f="${kv%%=*}"; v="${kv#*=}"
+    [[ "$(cat /proc/sys/$f 2>/dev/null)" == "$v" ]] || { echo "[i] restoring $f=$v" >&2; echo "$v" > /proc/sys/$f 2>/dev/null || true; }
+  done
+}
+throttle_writeback() {
+  # Keep little dirty data in RAM: a slow USB stick plus the ChromeOS browser can otherwise run
+  # the machine out of memory during the long extract/copy steps.
+  echo 0 > /proc/sys/vm/dirty_bytes 2>/dev/null || true
+  echo 8388608  > /proc/sys/vm/dirty_background_bytes 2>/dev/null || true
+  echo 33554432 > /proc/sys/vm/dirty_bytes 2>/dev/null || true
+}
+MASKED_HOOKS=(30-systemd-binfmt 30-systemd-daemon-reload-system 30-systemd-daemon-reload-user
+              30-systemd-sysctl 30-systemd-tmpfiles 30-systemd-udev-reload 30-systemd-update
+              30-systemd-hwdb 30-systemd-catalog 90-mkinitcpio-install 60-mkinitcpio-remove
+              71-dracut-install 60-dracut-remove)
+mask_hooks() {
+  mkdir -p "$MNT/etc/pacman.d/hooks"
+  local h
+  for h in "${MASKED_HOOKS[@]}"; do ln -sfn /dev/null "$MNT/etc/pacman.d/hooks/$h.hook"; done
+}
+unmask_hooks() {
+  local h
+  for h in "${MASKED_HOOKS[@]}"; do rm -f "$MNT/etc/pacman.d/hooks/$h.hook"; done
+  rmdir "$MNT/etc/pacman.d/hooks" 2>/dev/null || true
+}
+# Run a command inside the new rootfs, isolated from the ChromeOS host.
+in_chroot() {
+  unshare --mount --pid --fork --propagation private bash -c '
+    set -e
+    M="$1"; shift
+    mount -t proc proc "$M/proc"
+    # sysctl is global: make /proc/sys and sysrq read-only so no hook can touch the ChromeOS host
+    for x in sys sysrq-trigger; do
+      mount --bind "$M/proc/$x" "$M/proc/$x"
+      mount -o remount,bind,ro "$M/proc/$x"
+    done
+    mount --rbind /sys "$M/sys";  mount -o remount,bind,ro "$M/sys" 2>/dev/null || true
+    mount --rbind /dev "$M/dev"
+    mount -t tmpfs tmpfs "$M/tmp"
+    exec chroot "$M" /usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/bin HOME=/root TERM=dumb LANG=C "$@"
+  ' _ "$MNT" "$@"
+}
+
 cleanup() {
+  restore_sysctl
   for d in tmp dev sys proc; do
     mountpoint -q "$MNT/$d" 2>/dev/null && umount "$MNT/$d" 2>/dev/null || true
   done
@@ -27,6 +90,7 @@ cleanup() {
   [[ -z "$KERNEL_TMP_DIR" ]] || rm -rf "$KERNEL_TMP_DIR"
 }
 trap cleanup EXIT
+trap 'echo "[-] Error on line $LINENO (exit $?): $BASH_COMMAND" >&2' ERR
 
 die() { echo "[-] $*" >&2; exit 1; }
 CURL_OPTS=(--fail --location --show-error --connect-timeout 20 --retry 3 --retry-delay 3 --speed-time 45 --speed-limit 2000)
@@ -83,7 +147,7 @@ name="$(basename "$DEV")"
 [[ "$(rootdev -s -d 2>/dev/null || true)" != "$DEV" ]] \
   || die "$DEV is the disk ChromeOS is running from."
 
-for c in cgpt futility blockdev mkfs.ext4 bsdtar md5sum blkid dd findmnt mountpoint chroot crossystem curl; do
+for c in cgpt futility blockdev mkfs.ext4 bsdtar md5sum blkid dd findmnt mountpoint chroot crossystem curl unshare; do
   command -v "$c" >/dev/null 2>&1 || die "Required command is missing: $c"
 done
 KB=/usr/share/vboot/devkeys/kernel.keyblock
@@ -169,6 +233,11 @@ if [[ "${CONFIRM_ERASE:-}" != "$DEV" ]]; then
   [[ "$confirmation" == "$DEV" ]] || die "Confirmation did not match; aborting."
 fi
 
+LOG="$WORK/tarkin-install.log"
+exec > >(tee -a "$LOG") 2>&1
+echo "[i] Full log: $LOG (survives a reboot; send it if the machine restarts again)"
+save_sysctl
+throttle_writeback
 echo "== Repacking the stock kernel with the developer keys..."
 KERNEL_TMP_DIR="$(mktemp -d "$WORK/tarkin-kernel.XXXXXX")"
 dd if="$part_kern" of="$KERNEL_TMP_DIR/stock.bin" bs=1M status=none
@@ -299,9 +368,9 @@ if [[ -n "$WIFI_SSID" ]]; then
   chmod 600 "$WPA_CONF"
 fi
 
-echo "== Installing the terminal (cage, foot, seatd), Wi-Fi tools and sudo in the new rootfs (chroot, needs network)..."
-mount --bind /proc "$MNT/proc"; mount --bind /sys "$MNT/sys"; mount --bind /dev "$MNT/dev"
-mount -t tmpfs tmpfs "$MNT/tmp"
+echo "== Installing the terminal (cage, foot, seatd), Wi-Fi tools and sudo in the new rootfs (isolated chroot, needs network)..."
+sync
+mask_hooks
 resolv_saved=0
 if [[ -e "$MNT/etc/resolv.conf" || -L "$MNT/etc/resolv.conf" ]]; then
   mv "$MNT/etc/resolv.conf" "$MNT/etc/resolv.conf.orig"; resolv_saved=1
@@ -309,17 +378,20 @@ fi
 cp /etc/resolv.conf "$MNT/etc/resolv.conf" || true
 printf 'nameserver 1.1.1.1\nnameserver 9.9.9.9\n' >> "$MNT/etc/resolv.conf"
 PKG_OK=1
-chroot "$MNT" /bin/bash -c 'pacman-key --init >/dev/null 2>&1 && pacman-key --populate archlinuxarm >/dev/null 2>&1 && pacman -Syu --noconfirm --needed wpa_supplicant iw pciutils seatd cage foot foot-terminfo ttf-dejavu sudo nano' \
+# linux-aarch64 is ignored: this system boots the ChromeOS kernel, the Arch kernel is never used.
+in_chroot /bin/bash -c 'pacman-key --init >/dev/null 2>&1 && pacman-key --populate archlinuxarm >/dev/null 2>&1 && pacman -Syu --noconfirm --noprogressbar --needed --ignore linux-aarch64,linux-aarch64-headers wpa_supplicant iw pciutils seatd cage foot foot-terminfo ttf-dejavu sudo nano' \
   || { PKG_OK=0; echo "[!] Package install failed (no network from this shell?)." >&2; }
+sync
 [[ -x "$MNT/usr/bin/wpa_supplicant" && -x "$MNT/usr/bin/cage" && -x "$MNT/usr/bin/foot" && -x "$MNT/usr/bin/seatd" ]] || PKG_OK=0
+restore_sysctl
 
 if [[ -x "$MNT/usr/bin/usermod" ]]; then
-  for g in video input render audio seat seatd wheel; do
-    chroot "$MNT" getent group "$g" >/dev/null 2>&1 && chroot "$MNT" usermod -aG "$g" alarm || true
+  for g in video input render audio seat wheel; do
+    in_chroot getent group "$g" >/dev/null 2>&1 && in_chroot usermod -aG "$g" alarm || true
   done
   echo '%wheel ALL=(ALL:ALL) ALL' > "$MNT/etc/sudoers.d/10-wheel"; chmod 440 "$MNT/etc/sudoers.d/10-wheel"
   if [[ -n "$USER_PASS" ]]; then
-    printf 'alarm:%s\n' "$USER_PASS" | chroot "$MNT" chpasswd && chroot "$MNT" passwd -l root >/dev/null 2>&1 \
+    printf 'alarm:%s\n' "$USER_PASS" | in_chroot chpasswd && in_chroot passwd -l root >/dev/null 2>&1 \
       && echo "   Password set for alarm; root login locked (use sudo)." || echo "[!] Could not set the password: the default 'alarm' / 'alarm' stays."
   else
     echo "   Default account kept: alarm / alarm (change it with 'passwd')."
@@ -327,7 +399,7 @@ if [[ -x "$MNT/usr/bin/usermod" ]]; then
 fi
 
 if [[ -n "$WIFI_SSID" && -x "$MNT/usr/bin/wpa_passphrase" ]]; then
-  hashed="$(printf '%s\n' "$WIFI_PASS" | chroot "$MNT" /usr/bin/wpa_passphrase "$WIFI_SSID" 2>/dev/null | sed -n 's/^[[:space:]]*psk=\([0-9a-f]\{64\}\)$/\1/p')" || hashed=""
+  hashed="$(printf '%s\n' "$WIFI_PASS" | in_chroot /usr/bin/wpa_passphrase "$WIFI_SSID" 2>/dev/null | sed -n 's/^[[:space:]]*psk=\([0-9a-f]\{64\}\)$/\1/p')" || hashed=""
   if [[ "$hashed" =~ ^[0-9a-f]{64}$ ]]; then
     sed -i "s/^  psk=.*/  psk=$hashed/" "$WPA_CONF"
     echo "   Passphrase stored as a hashed PSK."
@@ -336,17 +408,11 @@ if [[ -n "$WIFI_SSID" && -x "$MNT/usr/bin/wpa_passphrase" ]]; then
   fi
 fi
 
-chroot "$MNT" gpgconf --kill all 2>/dev/null || true
-for p in /proc/[0-9]*; do
-  [[ "$(readlink "$p/root" 2>/dev/null)" == "$MNT" ]] && kill "${p#/proc/}" 2>/dev/null || true
-done
-sleep 1
+unmask_hooks
 rm -f "$MNT/etc/resolv.conf"
 [[ "$resolv_saved" == 1 ]] && rm -f "$MNT/etc/resolv.conf.orig" || true
 ln -sfn /run/systemd/resolve/stub-resolv.conf "$MNT/etc/resolv.conf"
-for d in tmp dev sys proc; do
-  mountpoint -q "$MNT/$d" && umount "$MNT/$d" || true
-done
+sync
 
 WANTS="$MNT/etc/systemd/system/multi-user.target.wants"
 mkdir -p "$WANTS" "$MNT/etc/systemd/system/timers.target.wants"

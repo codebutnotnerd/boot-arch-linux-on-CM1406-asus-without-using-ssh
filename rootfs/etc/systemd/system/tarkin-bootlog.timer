@@ -1,1 +1,9 @@
+[Unit]
+Description=Write the Tarkin boot report 90 s after boot
 
+[Timer]
+OnBootSec=90
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
