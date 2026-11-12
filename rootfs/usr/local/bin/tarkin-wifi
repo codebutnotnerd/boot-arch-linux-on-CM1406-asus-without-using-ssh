@@ -18,5 +18,8 @@ mkdir -p /etc/wpa_supplicant
 } > "$conf"
 chmod 600 "$conf"
 systemctl enable wpa_supplicant@wlan0.service >/dev/null 2>&1 || true
-systemctl restart wpa_supplicant@wlan0.service systemd-networkd.service
+if ! systemctl restart wpa_supplicant@wlan0.service systemd-networkd.service; then
+  echo "[-] Could not restart wpa_supplicant/systemd-networkd (is the wpa_supplicant package installed?)." >&2
+  exit 1
+fi
 echo "Done. Check with:  ip -br addr show wlan0   and   ping -c3 archlinux.org"

@@ -18,14 +18,15 @@ echo "== Stick: $DEV"
 
 echo "== Firmware flags"
 up="$(crossystem dev_boot_usb 2>&1)"; so="$(crossystem dev_boot_signed_only 2>&1)"; mf="$(crossystem mainfw_type 2>&1)"
-[[ "$up" == 1 ]] && ok "dev_boot_usb=1" || warn "dev_boot_usb=$up (need 1):  sudo crossystem dev_boot_usb=1 dev_boot_signed_only=0"
-[[ "$so" == 0 ]] && ok "dev_boot_signed_only=0" || warn "dev_boot_signed_only=$so (need 0)"
+[[ "$up" == 1* ]] && ok "dev_boot_usb=1" || warn "dev_boot_usb=$up (need 1):  sudo crossystem dev_boot_usb=1 dev_boot_signed_only=0"
+[[ "$so" == 0* ]] && ok "dev_boot_signed_only=0" || warn "dev_boot_signed_only=$so (need 0)"
 [[ "$mf" == developer ]] && ok "mainfw_type=developer" || warn "mainfw_type=$mf (need developer)"
 
 echo "== Partition table"
 cgpt show "$DEV"
-t="$(cgpt show -i 1 -t "$DEV" 2>/dev/null | tr 'A-F' 'a-f')"
-[[ "$t" == "$KERNEL_GUID" ]] && ok "partition 1 is a ChromeOS kernel partition" || warn "partition 1 is not of type ChromeOS kernel ($t): the firmware will say 'no valid image'. Re-run the installer."
+cgpt show -i 1 -t "$DEV" 2>/dev/null | grep -qi "$KERNEL_GUID" \
+  && ok "partition 1 is a ChromeOS kernel partition" \
+  || warn "partition 1 is not of type ChromeOS kernel: the firmware will say 'no valid image'. Re-run the installer."
 echo "  priority=$(cgpt show -i 1 -P "$DEV") tries=$(cgpt show -i 1 -T "$DEV") successful=$(cgpt show -i 1 -S "$DEV")"
 [[ "$(cgpt show -i 1 -P "$DEV")" -ge 1 ]] 2>/dev/null && ok "kernel priority >= 1" || warn "kernel priority is 0: the firmware skips this partition"
 
@@ -43,7 +44,11 @@ echo "== Root filesystem"
 M="$(mktemp -d /var/tmp/chk-root.XXXXXX)"
 if mount -o ro "$P2" "$M" 2>/dev/null; then
   PU="$(blkid -s PARTUUID -o value "$P2")"
-  grep -q "$PU" "$M/etc/fstab" 2>/dev/null && ok "fstab matches the root PARTUUID" || warn "fstab does not match the root PARTUUID"
+  if [[ -n "$PU" && "$(grep -c "$PU" "$M/etc/fstab" 2>/dev/null || echo 0)" -ge 1 ]]; then
+    ok "fstab matches the root PARTUUID"
+  else
+    warn "fstab does not match the root PARTUUID: the kernel will not find the root (kernel panic at boot)"
+  fi
   [[ -x "$M/usr/bin/cage" && -x "$M/usr/bin/foot" && -x "$M/usr/bin/seatd" ]] && ok "cage, foot and seatd installed" || warn "cage/foot/seatd NOT installed: no on-screen terminal (re-run the installer with working internet)"
   [[ -f "$M/etc/wpa_supplicant/wpa_supplicant-wlan0.conf" ]] && ok "Wi-Fi configuration present" || echo "  [info]    no Wi-Fi configured (use: sudo tarkin-wifi \"Name\" in the terminal)"
   [[ -x "$M/usr/bin/wpa_supplicant" ]] && ok "wpa_supplicant installed" || warn "wpa_supplicant NOT installed: the stick will have no Wi-Fi tools (re-run the installer with working internet)"
@@ -51,6 +56,27 @@ if mount -o ro "$P2" "$M" 2>/dev/null; then
   [[ -s "$M/etc/tarkin/console.env" ]] && ok "keyboard layout: $(cat "$M/etc/tarkin/console.env")" || warn "keyboard layout file missing"
   kv="$(uname -r)"; [[ -d "$M/usr/lib/modules/$kv" ]] && ok "kernel modules for $kv present" || warn "modules for $kv missing"
   ls "$M/usr/lib/firmware/updates/mediatek/mt7925/" >/dev/null 2>&1 && ok "MT7925 firmware present" || warn "MT7925 firmware missing"
+
+  svc="$M/etc/systemd/system/tarkin-console.service"
+  if [[ -f "$svc" ]]; then
+    suser="$(sed -n 's/^User=//p' "$svc" | head -1)"
+    sgroup="$(sed -n 's/^Group=//p' "$svc" | head -1)"
+    sgroups="$(sed -n 's/^SupplementaryGroups=//p' "$svc" | head -1)"
+    if [[ -n "$suser" ]]; then
+      grep -q "^$suser:" "$M/etc/passwd" 2>/dev/null && ok "service user '$suser' exists in the rootfs" || warn "service user '$suser' does not exist in the rootfs /etc/passwd: the service fails at step USER"
+    fi
+    for g in $sgroup $sgroups; do
+      if grep -q "^$g:" "$M/etc/group" 2>/dev/null; then
+        ok "group '$g' exists in the rootfs"
+      else
+        warn "group '$g' is listed in tarkin-console.service but missing from the rootfs /etc/group: the service dies with 216/GROUP 'Failed to determine supplementary groups' (black screen). Fix: re-run the installer (it creates missing groups), or mount the root rw and run: groupadd -r $g"
+      fi
+    done
+    [[ -e "$M/var/lib/systemd/linger/alarm" ]] && ok "linger enabled for the alarm user (/run/user/<uid> will exist)" || warn "no linger for the alarm user: /run/user/<uid> never appears and the terminal cannot start (cage needs XDG_RUNTIME_DIR)"
+  else
+    warn "tarkin-console.service not found in the rootfs"
+  fi
+
   if [[ -f "$M/var/log/tarkin-boot.log" ]]; then
     echo "== Last boot report from the stick (/var/log/tarkin-boot.log, first 40 lines)"; head -40 "$M/var/log/tarkin-boot.log"
   else

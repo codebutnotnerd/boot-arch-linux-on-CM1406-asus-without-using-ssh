@@ -2,7 +2,8 @@
 set -euo pipefail
 
 DEV=""
-ALARM_SOURCE="${ALARM_ARCHIVE:-https://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz}"
+ALARM_SOURCE="${ALARM_ARCHIVE:-}"
+ALARM_CUSTOM=0
 KEYMAP="${KEYMAP:-fr}"
 USER_PASS=""
 WIFI_SSID="${WIFI_SSID:-}"
@@ -15,12 +16,6 @@ KERNEL_TMP_DIR=""
 
 CMDLINE='console= loglevel=7 init=/sbin/init root=PARTUUID=%U/PARTNROFF=1 rootwait rw noinitrd net.ifnames=0 lsm=capability,landlock,yama,bpf cpuidle.governor=teo irqchip.gicv3_pseudo_nmi=1'
 
-# --- Host protection --------------------------------------------------------------------------
-# The package step runs Arch's pacman hooks. Those hooks (systemd-sysctl, binfmt, tmpfiles, ...)
-# act on whatever /proc and /sys they see. If the chroot shares ChromeOS's /proc they change the
-# RUNNING ChromeOS (sysctl, panic settings...), which is what made the Chromebook reboot by itself.
-# So: (1) the chroot runs in its own mount+pid namespace with /proc, /sys read-only,
-#     (2) the risky hooks are masked while installing, (3) kernel panic/vm settings are restored.
 SAVED_SYSCTL=()
 save_sysctl() {
   local f
@@ -39,8 +34,6 @@ restore_sysctl() {
   done
 }
 throttle_writeback() {
-  # Keep little dirty data in RAM: a slow USB stick plus the ChromeOS browser can otherwise run
-  # the machine out of memory during the long extract/copy steps.
   echo 0 > /proc/sys/vm/dirty_bytes 2>/dev/null || true
   echo 8388608  > /proc/sys/vm/dirty_background_bytes 2>/dev/null || true
   echo 33554432 > /proc/sys/vm/dirty_bytes 2>/dev/null || true
@@ -59,13 +52,11 @@ unmask_hooks() {
   for h in "${MASKED_HOOKS[@]}"; do rm -f "$MNT/etc/pacman.d/hooks/$h.hook"; done
   rmdir "$MNT/etc/pacman.d/hooks" 2>/dev/null || true
 }
-# Run a command inside the new rootfs, isolated from the ChromeOS host.
 in_chroot() {
   unshare --mount --pid --fork --propagation private bash -c '
     set -e
     M="$1"; shift
     mount -t proc proc "$M/proc"
-    # sysctl is global: make /proc/sys and sysrq read-only so no hook can touch the ChromeOS host
     for x in sys sysrq-trigger; do
       mount --bind "$M/proc/$x" "$M/proc/$x"
       mount -o remount,bind,ro "$M/proc/$x"
@@ -97,7 +88,7 @@ CURL_OPTS=(--fail --location --show-error --connect-timeout 20 --retry 3 --retry
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --alarm|-a)     ALARM_SOURCE="${2:?missing value for $1}"; shift 2 ;;
+    --alarm|-a)     ALARM_SOURCE="${2:?missing value for $1}"; ALARM_CUSTOM=1; shift 2 ;;
     --keymap|-k)    KEYMAP="${2:?missing value for $1}"; shift 2 ;;
     --wifi-ssid|-s) WIFI_SSID="${2:?missing value for $1}"; shift 2 ;;
     --wifi-pass|-w) die "Do not pass Wi-Fi passwords on the command line; the installer prompts for it." ;;
@@ -105,7 +96,8 @@ while [[ $# -gt 0 ]]; do
       cat <<'USAGE'
 Usage: sudo env CONFIRM_ERASE=/dev/sdX bash install/install-usb.sh [options] /dev/sdX
 Options:
-  --alarm,   -a <file|https-url>  ArchLinuxARM-aarch64 tarball (a matching .md5 file must sit next to it)
+  --alarm,   -a <file|http(s)-url>  ArchLinuxARM-aarch64 tarball (a matching .md5 file must sit next to it;
+                                  a .sig file beside it is verified too)
   --wifi-ssid, -s <ssid>          Wi-Fi network (WPA2-PSK); the passphrase is prompted. Default: the network
                                   saved in ChromeOS, if any.
   --keymap,  -k <layout>          Keyboard layout of the on-screen terminal (xkb name: fr, us, de, ...). Default: fr
@@ -114,6 +106,7 @@ Environment:
   ALLOW_NO_WIFI=1         allow an install without any Wi-Fi configuration
   WIFI_COUNTRY=FR         optional two-letter regulatory domain written to wpa_supplicant
   ALLOW_NO_PKGS=1         skip the network check and the Wi-Fi tools (the stick then has no on-screen terminal)
+  ALLOW_INSECURE_HTTP=1   accept a rootfs downloaded over plain http without a verifiable GPG signature
   FORCE_BOARD=1           skip the "this is a google,tarkin board" check
 USAGE
       exit 0 ;;
@@ -166,26 +159,75 @@ KVER="$(uname -r)"
 [[ -d "/lib/modules/$KVER" ]] || die "ChromeOS kernel modules not found in /lib/modules/$KVER."
 [[ -d /lib/firmware ]]        || die "ChromeOS firmware directory /lib/firmware not found."
 
-ARCHIVE="$ALARM_SOURCE"
-if [[ "$ALARM_SOURCE" =~ ^https:// ]]; then
+ALARM_KEY_FPR=68B3537F39A313B3E574D06777193F152BDBE6A6
+ALARM_KEYSERVERS=(hkps://keyserver.ubuntu.com hkps://keys.openpgp.org)
+
+verify_signature() {
+  local file="$1" sig="$2" gh ks status
+  command -v gpg >/dev/null 2>&1 || return 1
+  [[ -s "$sig" ]] || return 1
+  gh="$(mktemp -d "$WORK/alarm-gpg.XXXXXX")"
+  chmod 700 "$gh"
+  for ks in "${ALARM_KEYSERVERS[@]}"; do
+    if gpg --homedir "$gh" --batch --keyserver "$ks" --recv-keys "$ALARM_KEY_FPR" >/dev/null 2>&1; then break; fi
+  done
+  status="$(gpg --homedir "$gh" --batch --status-fd 1 --verify "$sig" "$file" 2>/dev/null)" || { rm -rf -- "$gh"; return 1; }
+  rm -rf -- "$gh"
+  grep -q "^\[GNUPG:\] VALIDSIG .*$ALARM_KEY_FPR" <<<"$status"
+}
+
+ARCHIVE=""
+ARCHIVE_URL=""
+if [[ -n "$ALARM_SOURCE" && "$ALARM_SOURCE" != http* ]]; then
+  [[ -f "$ALARM_SOURCE" ]] || die "Arch Linux ARM archive not found: $ALARM_SOURCE"
+  ARCHIVE="$ALARM_SOURCE"
+else
+  ALARM_MIRRORS=(
+    https://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
+    https://mirror.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
+    http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
+    http://mirror.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
+    http://fr.mirror.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
+    http://nj.us.mirror.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
+  )
+  [[ "$ALARM_CUSTOM" == 1 ]] && ALARM_MIRRORS=("$ALARM_SOURCE")
   ARCHIVE_TMP="$(mktemp -d "$WORK/alarm-dl.XXXXXX")"
   ARCHIVE="$ARCHIVE_TMP/ArchLinuxARM-aarch64-latest.tar.gz"
-  echo "== Downloading the rootfs (stalls are detected; if this fails, download it in the ChromeOS browser and use --alarm)..."
-  curl "${CURL_OPTS[@]}" "$ALARM_SOURCE" -o "$ARCHIVE" \
-    || die "Rootfs download failed. Download ArchLinuxARM-aarch64-latest.tar.gz and its .md5 with the browser into /var/tmp, then re-run with --alarm."
-  curl "${CURL_OPTS[@]}" "${ALARM_SOURCE}.md5" -o "$ARCHIVE.md5" || die "Checksum download failed."
-elif [[ "$ALARM_SOURCE" =~ ^http:// ]]; then
-  die "Rootfs download URLs must use HTTPS."
-elif [[ ! -f "$ARCHIVE" ]]; then
-  die "Arch Linux ARM archive not found: $ARCHIVE"
+  echo "== Downloading the rootfs (stalls are detected; https mirrors are tried first, then http)..."
+  for u in "${ALARM_MIRRORS[@]}"; do
+    echo "== Trying $u ..."
+    if curl "${CURL_OPTS[@]}" "$u" -o "$ARCHIVE" && curl "${CURL_OPTS[@]}" "${u}.md5" -o "$ARCHIVE.md5"; then
+      curl "${CURL_OPTS[@]}" "${u}.sig" -o "$ARCHIVE.sig" 2>/dev/null || rm -f "$ARCHIVE.sig"
+      ARCHIVE_URL="$u"
+      echo "== Rootfs downloaded from $u"
+      break
+    fi
+    rm -f "$ARCHIVE" "$ARCHIVE.md5" "$ARCHIVE.sig"
+  done
+  [[ -n "$ARCHIVE_URL" ]] || die "Could not download the rootfs from any mirror. Download ArchLinuxARM-aarch64-latest.tar.gz and its .md5 with the ChromeOS browser into /var/tmp, then re-run with --alarm."
 fi
+
 [[ -f "$ARCHIVE.md5" ]] || die "Missing checksum file: $ARCHIVE.md5"
 expected_md5="$(awk 'NR == 1 { print $1 }' "$ARCHIVE.md5" | tr '[:upper:]' '[:lower:]')"
 [[ "$expected_md5" =~ ^[0-9a-f]{32}$ ]] || die "Invalid MD5 checksum format in $ARCHIVE.md5"
 actual_md5="$(md5sum "$ARCHIVE" | awk '{ print $1 }')"
 [[ "$actual_md5" == "$expected_md5" ]] || die "Rootfs checksum mismatch; refusing to erase the USB drive."
 
-if [[ -z "$WIFI_SSID" && -f /var/cache/shill/default.profile ]]; then
+if [[ -s "$ARCHIVE.sig" ]]; then
+  if verify_signature "$ARCHIVE" "$ARCHIVE.sig"; then
+    echo "== Rootfs signature verified (key $ALARM_KEY_FPR)."
+  else
+    die "The signature of the rootfs does not verify against the Arch Linux ARM Build System key; refusing to erase the USB drive."
+  fi
+elif [[ "$ARCHIVE_URL" == http://* ]]; then
+  if [[ "${ALLOW_INSECURE_HTTP:-0}" == 1 ]]; then
+    echo "[!] The rootfs came over plain http and its authenticity could NOT be verified (ALLOW_INSECURE_HTTP=1)." >&2
+  else
+    die "The rootfs came over plain http and no verifiable GPG signature is available (needs gpg, the .sig file and a keyserver). A .md5 from the same server proves nothing. Download the tarball and its .md5 with the ChromeOS browser over https into /var/tmp and use --alarm, or set ALLOW_INSECURE_HTTP=1 to accept the risk."
+  fi
+fi
+
+if [[ -z "$WIFI_SSID" && "${ALLOW_NO_WIFI:-0}" != 1 && -f /var/cache/shill/default.profile ]]; then
   echo "== Reading the saved Wi-Fi network from ChromeOS..."
   prof=/var/cache/shill/default.profile
   WIFI_SSID="$(sed -n '/^\[wifi_/,/^\[/{s/^Name=//p}' "$prof" | head -1)"
@@ -211,7 +253,7 @@ fi
 
 if [[ "${ALLOW_NO_PKGS:-0}" != 1 ]]; then
   echo "== Checking network access to the Arch Linux ARM package mirror..."
-  curl -sSI --connect-timeout 15 --max-time 30 http://mirror.archlinuxarm.org/aarch64/core/core.db >/dev/null 2>&1 \
+  curl -sSIL --connect-timeout 15 --max-time 30 http://mirror.archlinuxarm.org/aarch64/core/core.db >/dev/null 2>&1 \
     || die "Cannot reach mirror.archlinuxarm.org from this shell. Check that ChromeOS has internet (Wi-Fi connected), try another network (a phone hotspot), or set ALLOW_NO_PKGS=1 to install without Wi-Fi tools (the stick then has no on-screen terminal)."
 fi
 
@@ -220,7 +262,7 @@ if [[ -t 0 ]]; then
   if [[ -n "$USER_PASS" ]]; then
     read -r -s -p "Repeat the password: " pass2; echo
     [[ "$USER_PASS" == "$pass2" ]] || die "The two passwords differ."
-    [[ "$USER_PASS" != *$'\n'* && "$USER_PASS" != *:* ]] || die "The password must not contain a colon."
+    [[ "$USER_PASS" != *$'\n'* && "$USER_PASS" != *$'\r'* && "$USER_PASS" != *:* ]] || die "The password must not contain a newline or a colon."
   fi
 fi
 
@@ -253,10 +295,10 @@ crossystem dev_boot_usb=1 dev_boot_signed_only=0
   || die "crossystem did not enable USB boot of developer-signed kernels."
 
 unmount_all() {
-  local p i
+  local p _
   for p in "$DEV"?*; do
     [[ -b "$p" ]] || continue
-    for i in 1 2 3; do
+    for _ in 1 2 3; do
       findmnt -rn -S "$p" >/dev/null 2>&1 || break
       umount "$p" 2>/dev/null || umount -l "$p" 2>/dev/null || sleep 1
     done
@@ -269,7 +311,7 @@ unmount_all
 
 echo "== Partitioning $DEV (ChromeOS GPT: p1 kernel, p2 root)..."
 total_sectors="$(blockdev --getsz "$DEV")"
-(( total_sectors > 139264 + 8 * 2097152 )) || die "USB device is too small (the root filesystem needs about 3 GiB free after extraction; 8 GiB or more is required, 16 GiB recommended)."
+(( total_sectors > 139264 + 4 * 2097152 )) || die "USB device is too small (the system needs about 4 GiB on the stick; 8 GiB or more is recommended, 16 GiB comfortable)."
 cgpt create "$DEV"
 cgpt boot -p "$DEV"
 cgpt add -i 1 -t kernel -b 8192 -s 131072 -l KERN-A -S 1 -T 1 -P 15 "$DEV"
@@ -278,7 +320,7 @@ part1="${DEV}1"; part2="${DEV}2"
 [[ "$DEV" =~ [0-9]$ ]] && { part1="${DEV}p1"; part2="${DEV}p2"; }
 expected2=$((total_sectors - 139264 - 2048))
 size2=0
-for i in 1 2 3 4 5; do
+for _ in 1 2 3 4 5; do
   blockdev --rereadpt "$DEV" 2>/dev/null || true
   udevadm settle 2>/dev/null || sleep 2
   size2="$(blockdev --getsz "$part2" 2>/dev/null || echo 0)"
@@ -313,9 +355,12 @@ cp -R --no-preserve=ownership "$REPO_ROOT/rootfs/." "$MNT/"
   chown 0:0 "$MNT/$f"
   case "$f" in ./usr/local/bin/*|./usr/local/libexec/*) chmod 755 "$MNT/$f" ;; *) chmod 644 "$MNT/$f" ;; esac
 done
+ALARM_UID="$(awk -F: '$1 == "alarm" { print $3 }' "$MNT/etc/passwd")"
+ALARM_GID="$(awk -F: '$1 == "alarm" { print $4 }' "$MNT/etc/passwd")"
+ALARM_UID="${ALARM_UID:-1000}"; ALARM_GID="${ALARM_GID:-1000}"
 if [[ -d "$MNT/home/alarm" ]]; then
   install -m 755 "$REPO_ROOT/scripts/install-desktop.sh" "$MNT/home/alarm/install-desktop.sh"
-  chown 1000:1000 "$MNT/home/alarm/install-desktop.sh"
+  chown "$ALARM_UID:$ALARM_GID" "$MNT/home/alarm/install-desktop.sh"
 fi
 mkdir -p "$MNT/etc/tarkin"
 printf 'XKB_DEFAULT_LAYOUT=%s\n' "$KEYMAP" > "$MNT/etc/tarkin/console.env"
@@ -352,49 +397,59 @@ EOF
 WPA_CONF="$MNT/etc/wpa_supplicant/wpa_supplicant-wlan0.conf"
 if [[ -n "$WIFI_SSID" ]]; then
   echo "== Configuring Wi-Fi for '$WIFI_SSID'..."
-  SSID_ESC="${WIFI_SSID//\\/\\\\}"; SSID_ESC="${SSID_ESC//\"/\\\"}"
-  PASS_ESC="${WIFI_PASS//\\/\\\\}"; PASS_ESC="${PASS_ESC//\"/\\\"}"
   mkdir -p "$MNT/etc/wpa_supplicant"
   {
     echo "ctrl_interface=/run/wpa_supplicant"
     echo "update_config=1"
     [[ -z "${WIFI_COUNTRY:-}" ]] || echo "country=$WIFI_COUNTRY"
     echo "network={"
-    echo "  ssid=\"$SSID_ESC\""
-    echo "  psk=\"$PASS_ESC\""
+    echo "  ssid=\"$WIFI_SSID\""
+    echo "  psk=\"$WIFI_PASS\""
     echo "  key_mgmt=WPA-PSK"
     echo "}"
   } > "$WPA_CONF"
   chmod 600 "$WPA_CONF"
 fi
 
-echo "== Installing the terminal (cage, foot, seatd), Wi-Fi tools and sudo in the new rootfs (isolated chroot, needs network)..."
-sync
-mask_hooks
 resolv_saved=0
-if [[ -e "$MNT/etc/resolv.conf" || -L "$MNT/etc/resolv.conf" ]]; then
-  mv "$MNT/etc/resolv.conf" "$MNT/etc/resolv.conf.orig"; resolv_saved=1
+if [[ "${ALLOW_NO_PKGS:-0}" == 1 ]]; then
+  echo "[i] ALLOW_NO_PKGS=1: skipping the package install entirely (no terminal, no Wi-Fi tools on the stick)."
+else
+  echo "== Installing the terminal (cage, foot, seatd), Wi-Fi tools and sudo in the new rootfs (isolated chroot, needs network)..."
+  sync
+  mask_hooks
+  if [[ -e "$MNT/etc/resolv.conf" || -L "$MNT/etc/resolv.conf" ]]; then
+    mv "$MNT/etc/resolv.conf" "$MNT/etc/resolv.conf.orig"; resolv_saved=1
+  fi
+  cp /etc/resolv.conf "$MNT/etc/resolv.conf" || true
+  printf 'nameserver 1.1.1.1\nnameserver 9.9.9.9\n' >> "$MNT/etc/resolv.conf"
+  PKG_OK=1
+  in_chroot /bin/bash -c 'pacman-key --init >/dev/null 2>&1 && pacman-key --populate archlinuxarm >/dev/null 2>&1 && pacman -Syu --noconfirm --noprogressbar --needed --ignore linux-aarch64,linux-aarch64-headers wpa_supplicant iw pciutils seatd cage foot foot-terminfo ttf-dejavu sudo nano' \
+    || { PKG_OK=0; echo "[!] Package install failed (no network from this shell?)." >&2; }
+  sync
+  [[ -x "$MNT/usr/bin/wpa_supplicant" && -x "$MNT/usr/bin/cage" && -x "$MNT/usr/bin/foot" && -x "$MNT/usr/bin/seatd" ]] || PKG_OK=0
+  restore_sysctl
 fi
-cp /etc/resolv.conf "$MNT/etc/resolv.conf" || true
-printf 'nameserver 1.1.1.1\nnameserver 9.9.9.9\n' >> "$MNT/etc/resolv.conf"
-PKG_OK=1
-# linux-aarch64 is ignored: this system boots the ChromeOS kernel, the Arch kernel is never used.
-in_chroot /bin/bash -c 'pacman-key --init >/dev/null 2>&1 && pacman-key --populate archlinuxarm >/dev/null 2>&1 && pacman -Syu --noconfirm --noprogressbar --needed --ignore linux-aarch64,linux-aarch64-headers wpa_supplicant iw pciutils seatd cage foot foot-terminfo ttf-dejavu sudo nano' \
-  || { PKG_OK=0; echo "[!] Package install failed (no network from this shell?)." >&2; }
-sync
-[[ -x "$MNT/usr/bin/wpa_supplicant" && -x "$MNT/usr/bin/cage" && -x "$MNT/usr/bin/foot" && -x "$MNT/usr/bin/seatd" ]] || PKG_OK=0
-restore_sysctl
 
 if [[ -x "$MNT/usr/bin/usermod" ]]; then
   for g in video input render audio seat wheel; do
-    in_chroot getent group "$g" >/dev/null 2>&1 && in_chroot usermod -aG "$g" alarm || true
+    in_chroot getent group "$g" >/dev/null 2>&1 || { in_chroot groupadd -r "$g" 2>/dev/null || true; }
+    in_chroot usermod -aG "$g" alarm || echo "[!] Could not add the user alarm to group $g." >&2
+  done
+  for g in video input render audio seat; do
+    in_chroot getent group "$g" >/dev/null 2>&1 \
+      || echo "[!] Group $g is still missing in the rootfs: tarkin-console.service lists it and will fail with 216/GROUP. Run scripts/check-usb.sh after booting ChromeOS." >&2
   done
   echo '%wheel ALL=(ALL:ALL) ALL' > "$MNT/etc/sudoers.d/10-wheel"; chmod 440 "$MNT/etc/sudoers.d/10-wheel"
   if [[ -n "$USER_PASS" ]]; then
-    printf 'alarm:%s\n' "$USER_PASS" | in_chroot chpasswd && in_chroot passwd -l root >/dev/null 2>&1 \
-      && echo "   Password set for alarm; root login locked (use sudo)." || echo "[!] Could not set the password: the default 'alarm' / 'alarm' stays."
+    if printf 'alarm:%s\n' "$USER_PASS" | in_chroot chpasswd; then
+      in_chroot passwd -l root >/dev/null 2>&1 || true
+      echo "   Password set for alarm; root login locked (use sudo)."
+    else
+      echo "[!] Could not set the password: the default 'alarm' / 'alarm' stays. Change it at first boot with: passwd"
+    fi
   else
-    echo "   Default account kept: alarm / alarm (change it with 'passwd')."
+    echo "   Default account kept: alarm / alarm. CHANGE IT at first boot with: passwd"
   fi
 fi
 
@@ -408,10 +463,12 @@ if [[ -n "$WIFI_SSID" && -x "$MNT/usr/bin/wpa_passphrase" ]]; then
   fi
 fi
 
-unmask_hooks
-rm -f "$MNT/etc/resolv.conf"
-[[ "$resolv_saved" == 1 ]] && rm -f "$MNT/etc/resolv.conf.orig" || true
-ln -sfn /run/systemd/resolve/stub-resolv.conf "$MNT/etc/resolv.conf"
+if [[ "${ALLOW_NO_PKGS:-0}" != 1 ]]; then
+  unmask_hooks
+  rm -f "$MNT/etc/resolv.conf"
+  [[ "$resolv_saved" == 1 ]] && rm -f "$MNT/etc/resolv.conf.orig" || true
+  ln -sfn /run/systemd/resolve/stub-resolv.conf "$MNT/etc/resolv.conf"
+fi
 sync
 
 WANTS="$MNT/etc/systemd/system/multi-user.target.wants"
@@ -446,11 +503,12 @@ echo "   Kernel on $part1: written and verified."
 
 if [[ "${PKG_OK:-1}" != 1 && "${ALLOW_NO_PKGS:-0}" != 1 ]]; then
   cat <<'WARN'
-##########################################################
-[!] WARNING: wpa_supplicant could NOT be installed on the stick.
-    The system will probably boot but will have no on-screen terminal and no Wi-Fi tools.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+[!] WARNING: the packages (wpa_supplicant, cage, foot, seatd, ...) could NOT all
+    be installed on the stick. The system will probably boot but may have no
+    on-screen terminal and no Wi-Fi tools.
     Fix the network (see README, "Troubleshooting") and run the installer again.
-##########################################################
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 WARN
 fi
 cat <<EOF
@@ -461,8 +519,9 @@ Boot it:
  1. Leave the stick plugged in and power the Chromebook off, then on.
  2. At the 'OS verification is OFF' screen press Ctrl+U.
  3. Wait 1-2 minutes: a terminal should appear on the screen (the firmware logo may stay up for a while).
-    Log in is automatic as 'alarm'; use  sudo  for administration and  sudo tarkin-wifi "Network"  for Wi-Fi.
-    Optional desktop (Wi-Fi first):  bash ~/install-desktop.sh  then  sudo tarkin-session desktop
+    First command to run:  passwd  (the default account is alarm/alarm until you change it).
+    Administration: sudo. Wi-Fi: sudo tarkin-wifi "Network".
+    Optional desktop (Wi-Fi first): bash ~/install-desktop.sh then sudo tarkin-session desktop
     If the screen stays black or frozen on the logo for 3 minutes, this experimental console did not start:
     power off, then see README, "Troubleshooting".
 

@@ -46,3 +46,30 @@ partition UUID, serial number, MAC) is reproduced here. "Seen in the DT" means n
   USB path works), then re-sign it step by step with `scripts/set-cmdline.sh` (`--same`, `--probe`, `--normal`). A warm
   reset after a kernel panic keeps `/sys/fs/pstore/console-ramoops-0`; holding Power wipes it.
 - Confirmed working afterwards: on-screen terminal, built-in keyboard, Wi-Fi (MT7925) and pacman.
+
+## ALARM mirror status (2026-11-11)
+
+- https://os.archlinuxarm.org and https://mirror.archlinuxarm.org currently serve a certificate whose SAN does not
+  match the hostname (curl error 60). http:// works and redirects to a regional mirror chosen by geography
+  (fr.mirror.archlinuxarm.org from France, nj/fl.us.mirror.archlinuxarm.org from the US); the latest tarball is
+  about 790 MB and its .md5 is served beside it.
+- install-usb.sh therefore tries several mirrors in order (https first, then http) and verifies the tarball with
+  the .md5; scripts/preflight-tarkin.sh reports the mirror over http when https fails.
+
+## Terminal failure seen once: 216/GROUP (supplementary groups)
+
+- Symptom: black screen; `tarkin-console.service` restarted again and again (about 16 restarts in the journal), then
+  the journal ends with `Failed at step GROUP` / `Failed to determine supplementary groups`, status `216/GROUP`.
+- Cause: a group listed in `SupplementaryGroups=` of `tarkin-console.service` did not exist in the rootfs
+  `/etc/group`; systemd refuses to start the unit, and on a headless board that failure is invisible (black screen).
+- Now handled:
+  - `scripts/check-usb.sh` checks every group of `SupplementaryGroups=` (plus the `User=`/`Group=` of the unit, and
+    the linger file for `alarm`) against the stick's `/etc/group` and prints `[PROBLEM]` naming the missing one.
+  - `install/install-usb.sh` creates any missing group (`groupadd -r`) before adding `alarm` to it, and warns if a
+    service group still does not exist in the rootfs.
+  - `tarkin-console.service` no longer hardcodes UID 1000 (`user@1000.service`, `/run/user/1000` are gone): the
+    launcher waits up to 60 s for `/run/user/<uid>` (the installer enables linger for `alarm`, so the user manager
+    starts whatever the UID is) and up to 20 s for a `/dev/dri/card*` node. The unit has
+    `StartLimitIntervalSec=60` / `StartLimitBurst=5`, so it stops after 5 failed starts in 60 s instead of looping
+    forever.
+

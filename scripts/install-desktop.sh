@@ -5,7 +5,12 @@ info() { echo "== $*"; }
 warn() { echo "[!] $*" >&2; }
 
 CONFIGS_ONLY=0
-[[ "${1:-}" == "--configs-only" ]] && CONFIGS_ONLY=1
+case "${1:-}" in
+  "") ;;
+  --configs-only) CONFIGS_ONLY=1 ;;
+  -h|--help) echo "Usage: bash ~/install-desktop.sh [--configs-only]"; exit 0 ;;
+  *) die "Unknown option: $1 (use no argument or --configs-only)" ;;
+esac
 [[ $EUID -ne 0 ]] || die "Run it as the normal user (alarm), not as root. sudo is used where needed."
 CFG="${XDG_CONFIG_HOME:-$HOME/.config}"
 
@@ -36,13 +41,25 @@ if (( ! CONFIGS_ONLY )); then
   cat > "$tmp/console" <<'TARKIN_CONSOLE_EOF'
 #!/bin/bash
 set -u
-cd "$HOME"
-export XDG_RUNTIME_DIR=/run/user/$(id -u)
+cd "$HOME" || exit 1
+uid="$(id -u)"
+export XDG_RUNTIME_DIR="/run/user/$uid"
+n=0
+while [[ ! -d "$XDG_RUNTIME_DIR" && $n -lt 60 ]]; do
+  sleep 1; n=$((n+1))
+done
+if [[ ! -d "$XDG_RUNTIME_DIR" ]]; then
+  echo "tarkin-console: $XDG_RUNTIME_DIR missing after ${n}s (user manager not running? check linger)" >&2
+  exit 1
+fi
 export LIBSEAT_BACKEND=seatd SEATD_VTBOUND=0
 export LANG=C.UTF-8
 export WLR_RENDERER=pixman WLR_NO_HARDWARE_CURSORS=1
+n=0
+until ls /dev/dri/card[0-9] >/dev/null 2>&1 || (( n >= 20 )); do sleep 1; n=$((n+1)); done
 card=/dev/dri/card0
 for c in /sys/class/drm/card[0-9]; do
+  [[ -e "$c" && -e "/dev/dri/$(basename "$c")" ]] || continue
   if [[ "$(readlink -f "$c/device/driver" 2>/dev/null)" == *mediatek* ]]; then card="/dev/dri/$(basename "$c")"; break; fi
 done
 export WLR_DRM_DEVICES="$card"
@@ -213,7 +230,9 @@ default-timeout=5000
 EOF
 
 put "$CFG/foot/foot.ini" <<'EOF'
+[main]
 font=monospace:size=13
+
 [colors]
 alpha=0.95
 background=202020

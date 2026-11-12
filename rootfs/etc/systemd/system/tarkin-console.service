@@ -1,19 +1,18 @@
 [Unit]
 Description=Tarkin on-screen terminal (cage + foot)
-After=systemd-user-sessions.service seatd.service user@1000.service systemd-udev-settle.service
+After=systemd-user-sessions.service seatd.service
 Wants=seatd.service
-Requires=user@1000.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
 User=alarm
 Group=alarm
 SupplementaryGroups=video input render audio seat
-Environment=XDG_RUNTIME_DIR=/run/user/1000
 ExecStart=/usr/local/libexec/tarkin/console
 Restart=always
 RestartSec=3
-StartLimitIntervalSec=0
 StandardInput=null
 StandardOutput=journal
 StandardError=journal

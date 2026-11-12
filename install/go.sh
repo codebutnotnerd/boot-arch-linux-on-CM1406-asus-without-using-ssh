@@ -35,7 +35,7 @@ if (( ${#disks[@]} == 0 )); then
   exit 1
 fi
 echo "USB sticks:"
-printf '   /dev/%s\n' "${disks[@]}"
+for d in "${disks[@]}"; do printf '   /dev/%-8s %s\n' "${d%% *}" "${d#* }"; done
 default="/dev/${disks[0]%% *}"
 read -r -p "Device to ERASE and install on [$default]: " DEV
 DEV="${DEV:-$default}"

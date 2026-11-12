@@ -7,6 +7,7 @@ DEV="${1:-}"; MODE="${2:-}"
 [[ $EUID -eq 0 ]] || die "Run as root (sudo, from VT2)."
 for c in futility dd cgpt rootdev lsblk; do command -v "$c" >/dev/null || die "Missing command: $c"; done
 [[ "$DEV" != "$(rootdev -s -d)" ]] || die "$DEV is the running ChromeOS disk."
+case "$DEV" in *mmcblk*) die "$DEV looks like the internal eMMC.";; esac
 [[ "$(lsblk -dno RM "$DEV" | tr -d ' ')" == 1 ]] || die "$DEV is not removable."
 if [[ "$DEV" =~ [0-9]$ ]]; then P1="${DEV}p1"; else P1="${DEV}1"; fi
 [[ -b "$P1" ]] || die "$P1 not found."

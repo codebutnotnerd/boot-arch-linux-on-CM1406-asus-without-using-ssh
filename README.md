@@ -1,8 +1,11 @@
-# Arch Linux ARM on the ASUS Chromebook CM1406 
+# Arch Linux ARM on the ASUS Chromebook CM1406 (no SSH)
 
 This boots Arch Linux ARM from a USB stick on the ASUS Chromebook CM1406 (board `google,tarkin`, MediaTek MT8189,
 eMMC). ChromeOS stays on the internal storage and is never touched. Unplug the stick and the machine boots ChromeOS
 like before.
+
+Cut down from [zoan37's Omarchy / Arch Linux ARM Chromebook CM14 project](https://github.com/zoan37/lenovo-slim3-chromebook-omarchy),
+which boots a full Omarchy desktop on this same generation of MediaTek Chromebooks.
 
 There is no SSH and no second computer involved. The system draws a terminal on the built-in screen and you type on
 the built-in keyboard.
@@ -26,8 +29,9 @@ Written but not tested on the hardware yet: the desktop (`labwc`, `waybar`, `fuz
 Not tested at all: audio, Bluetooth, suspend, touchpad and touchscreen, brightness keys. The GPU is not used (see
 the GPU section).
 
-Login is automatic as `alarm`, password `alarm` unless you set another one during the install. Suspend is off, the
-machine reboots 10 seconds after a kernel panic, and the journal is kept on the stick.
+Login is automatic as `alarm`, password `alarm` unless you set another one during the install. Change that password
+at the first boot with `passwd`: the stick has no SSH, but anyone holding the machine can log in until you do.
+Suspend is off, the machine reboots 10 seconds after a kernel panic, and the journal is kept on the stick.
 
 ## You need
 
@@ -46,7 +50,8 @@ is shared by both.
 ## Install
 
 **1. Download** these with the ChromeOS browser into Downloads: this repository as a zip, and
-<https://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz> plus its `.md5` file next to it.
+<https://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz> plus its `.md5` file next to it. Prefer the
+browser and https: a `.md5` fetched over plain http from the same server does not prove the file is genuine.
 
 **2. Unpack** in the crosh tab (`Ctrl+Alt+T`, then `shell`):
 
@@ -77,9 +82,10 @@ sudo bash install/go.sh
 ```
 
 It finds the tarball and the stick, shows you the device and makes you type its name before erasing anything. It then
-asks for a password for `alarm` (leave it empty to keep the default; if you set one, root login is locked). It
-checks that the package mirror answers before it erases anything, and it reads the kernel back after writing it.
-Wait for `[+] USB written` before you unplug.
+asks for a password for `alarm` (leave it empty to keep the default `alarm` / `alarm`; if you set one, root login is
+locked — and change the default with `passwd` right after the first boot). It checks that the package mirror answers
+before it erases anything, and it reads the kernel back after writing it. Wait for `[+] USB written` before you
+unplug.
 
 Options go after `go.sh`, for example `sudo bash install/go.sh --keymap us`:
 
@@ -87,8 +93,10 @@ Options go after `go.sh`, for example `sudo bash install/go.sh --keymap us`:
 |---|---|
 | `--keymap <layout>` | Keyboard layout of the terminal (`fr`, `us`, `de`, ...). Default `fr`. |
 | `--wifi-ssid <name>` | Use this Wi-Fi instead of the one saved in ChromeOS (it asks for the passphrase). |
-| `--alarm <file or https url>` | Rootfs tarball, with its `.md5` next to it. |
+| `--alarm <file or url>` | Rootfs tarball, with its `.md5` next to it (a `.sig` beside it is verified against the Arch Linux ARM key). |
 | `WIFI_COUNTRY=FR` | Wi-Fi regulatory domain (environment variable). |
+| `ALLOW_NO_WIFI=1` | Ignore the Wi-Fi network saved in ChromeOS (configure it later with `sudo tarkin-wifi "Name"`). |
+| `ALLOW_INSECURE_HTTP=1` | Accept a rootfs that came over plain http without a verifiable GPG signature. Refused by default. |
 | `ALLOW_NO_PKGS=1` | Skip the network check and the packages. The stick will have no terminal. |
 | `FORCE_BOARD=1` | Skip the `google,tarkin` check. Not recommended. |
 
@@ -168,6 +176,7 @@ It checks the firmware flags, the partition table, the kernel signature and the 
 | `go.sh` finds no USB stick | Replug, wait 5 s, try another port (no hub) or another stick. `dmesg \| tail` should show `sd 0:0:0:0: [sda]`. |
 | `curl` hangs on the rootfs | Download it with the browser (step 1) and put it in `/var/tmp`. |
 | `Cannot reach mirror.archlinuxarm.org` | ChromeOS has no internet, or the network filters it. Try a phone hotspot. |
+| `The rootfs came over plain http and no verifiable GPG signature is available` | The https mirrors failed and the http fallback cannot be authenticated. Download the tarball and its `.md5` with the ChromeOS browser (https) into `/var/tmp` and run the installer again; the installer then uses it. `ALLOW_INSECURE_HTTP=1` accepts the risk. |
 | Warning that packages could not be installed | Same cause. Fix the network and run the installer again, or there will be no terminal. |
 | "No valid image detected" | The firmware rejected the stick. `check-usb.sh` tells you why: wrong partition type, priority 0, bad signature, or `dev_boot_usb` at 0. |
 | It boots ChromeOS instead | You missed the menu, or `dev_boot_usb` is 0: `sudo crossystem dev_boot_usb=1 dev_boot_signed_only=0`. |
@@ -177,7 +186,25 @@ It checks the firmware flags, the partition table, the kernel signature and the 
 | Wrong characters in the terminal | Edit `/etc/tarkin/console.env` (`XKB_DEFAULT_LAYOUT=us`), then `sudo systemctl restart tarkin-console`. |
 | Text too small or too big | Edit `/etc/xdg/foot/foot.ini` (`font=monospace:size=14`). |
 | `pacman` can't download | Check the network first: `getent hosts mirror.archlinuxarm.org`, `ping 1.1.1.1`. |
+| Black screen, `journalctl -u tarkin-console -b` shows `216/GROUP` or `Failed to determine supplementary groups` | A group of the console service is missing from the stick's `/etc/group`. See [216/GROUP](#black-screen-with-216group-supplementary-groups) below. |
 | The desktop doesn't start | It falls back to the terminal. See `journalctl -u tarkin-console -b`, or run `sudo tarkin-session terminal`. |
+
+### Black screen with 216/GROUP (supplementary groups)
+
+Symptom: the boot reaches userspace but the screen stays black. `journalctl -u tarkin-console -b` (or the
+`console journal` part of `tarkin-boot.log`, printed by `check-usb.sh`) ends with
+`tarkin-console.service: Failed to determine supplementary groups`, exit status `216/GROUP`, and the unit restarts
+until the start limit (5 starts in 60 s) stops it.
+
+Cause: `tarkin-console.service` declares `SupplementaryGroups=video input render audio seat`. If one of those groups
+is missing from the stick's `/etc/group`, systemd cannot resolve it and refuses to start the service at all. On a
+headless board that failure is invisible: just a black screen. This is what happened with seatd once — a group was
+listed in the service but absent from the system.
+
+Correction: boot ChromeOS and run `sudo bash scripts/check-usb.sh` — it checks every group of
+`SupplementaryGroups=` against the stick's `/etc/group` and prints a `[PROBLEM]` line naming the missing one.
+Fix by re-running the installer (it now creates any missing group before adding `alarm` to it), or by hand: mount the
+stick's root partition read-write and run `groupadd -r <group>` inside it, then reboot.
 
 ### Debugging the kernel command line
 
@@ -205,7 +232,8 @@ To undo everything: remove the stick and boot ChromeOS (`Ctrl+D`). To put the fi
 - `install/go.sh`: guided launcher for VT2, finds the tarball and the stick
 - `install/install-usb.sh`: the installer (logs to `/var/tmp/tarkin-install.log`)
 - `scripts/preflight-tarkin.sh`: read-only checks before installing
-- `scripts/check-usb.sh`: diagnoses a stick and the last failed boot
+- `scripts/check-usb.sh`: diagnoses a stick and the last failed boot (it also verifies that every group of the
+  console service exists in the stick's `/etc/group`)
 - `scripts/set-cmdline.sh`: rewrites the kernel command line of an installed stick
 - `scripts/install-desktop.sh`: the optional desktop (the installer copies it to `/home/alarm`)
 - `scripts/identify-device.sh`: optional hardware report with HWID, serial and MAC removed
@@ -216,7 +244,8 @@ To undo everything: remove the stick and boot ChromeOS (`Ctrl+D`). To put the fi
 ## Safety
 
 - Use a spare stick. Never point the installer at `/dev/mmcblk0`; it refuses non-removable disks and the running disk.
-- Nothing listens for SSH. The only way in is the keyboard, so set a password during the install.
+- The default account is `alarm` / `alarm` with automatic login and nothing listening for SSH. Set a real password
+  during the install, or run `passwd` right after the first boot.
 - Developer Mode and `dev_boot_signed_only=0` weaken boot verification. Put the flags back when you stop using USB boot.
 - Only do this on a machine you own or may modify. A school-managed Chromebook may forbid Developer Mode.
 - Don't publish HWIDs, serial numbers, MAC addresses, partition UUIDs, Wi-Fi credentials or GitHub tokens.

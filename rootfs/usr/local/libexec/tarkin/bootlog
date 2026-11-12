@@ -6,6 +6,8 @@ echo "== cmdline";         cat /proc/cmdline
 echo "== systemd state";   systemctl is-system-running
 echo "== failed units";    systemctl --failed --no-legend
 echo "== console service"; systemctl status tarkin-console.service seatd.service --no-pager -n 30
+echo "== console unit";    systemctl show tarkin-console.service -p ActiveState,SubState,Result,ExecMainStatus,NRestarts 2>/dev/null
+echo "== console groups";  grep '^SupplementaryGroups=' /etc/systemd/system/tarkin-console.service 2>/dev/null; id alarm 2>&1; getent group video input render audio seat 2>&1
 echo "== console journal"; journalctl -b -u tarkin-console.service -u seatd.service --no-pager 2>/dev/null | tail -80
 echo "== drm";             ls -l /dev/dri 2>&1; for c in /sys/class/drm/card*; do echo "$c -> $(readlink -f "$c/device/driver" 2>/dev/null)"; done
 echo "== input";           grep -E 'Name=|Handlers=' /proc/bus/input/devices
