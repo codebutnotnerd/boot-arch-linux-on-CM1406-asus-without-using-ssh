@@ -73,3 +73,128 @@ partition UUID, serial number, MAC) is reproduced here. "Seen in the DT" means n
     `StartLimitIntervalSec=60` / `StartLimitBurst=5`, so it stops after 5 failed starts in 60 s instead of looping
     forever.
 
+
+## Confirmed root cause: hung-task panic during a USB-rootfs pacman transaction (2026-11-14)
+
+Symptom: installing a desktop (XFCE) hung at "Updating MIME cache", the machine rebooted, and the next boot was a
+black screen with no way in (the ChromeOS kernel has no text console).
+
+Evidence from `/sys/fs/pstore/console-ramoops-0` after the crash:
+
+```
+INFO: task pacman:547 blocked for more than 122 seconds.
+task:pacman  state:D
+  wb_wait_for_completion -> sync_inodes_sb -> sync_inodes_one_sb -> iterate_supers
+  -> ksys_sync -> arm64_sys_sync -> ...
+Kernel panic - not syncing: hung_task: blocked tasks
+CPU: 4 PID: 72 Comm: khungtaskd
+Rebooting in 10 seconds..
+```
+
+What it means:
+
+- `pacman` reached the end of the transaction, called `sync()`, and waited in `wb_wait_for_completion` for the USB
+  stick to flush the dirty pages. The default `vm.dirty_ratio` (20 % of 4 GB ~ 800 MB) lets a whole sysupgrade pile up
+  in RAM first.
+- The stick could not drain it in time. Measured with `dd oflag=direct conv=fsync`: **3.9 MB/s** (USB 3.0 link, 5000M,
+  so the link was not the limit). 122 s x 3.9 MB/s ~ 475 MB: the backlog could never have made it.
+- `kernel.hung_task_panic=1` (kernel default here) turns the stall into a panic; `kernel.panic=10` from
+  `rootfs/etc/sysctl.d/90-tarkin-panic.conf` reboots 10 s later, in the middle of the transaction.
+- Unsynchronised writes are lost: `pacman.log` ended as 36864 bytes with 1988 NUL bytes, the classic signature of a
+  file extended but never flushed. `db.lck` survived, so the package database and the file tree disagreed, `cage`/
+  `foot` ended up half-upgraded, and `tarkin-console.service` failed 5 times -> black screen.
+
+Fixes now in the repository:
+
+- `rootfs/etc/sysctl.d/90-tarkin-panic.conf`: `kernel.hung_task_panic=0`, plus `vm.dirty_bytes=32 MB` /
+  `vm.dirty_background_bytes=8 MB`.
+- `scripts/install-desktop.sh` no longer runs a full `pacman -Syu`; it installs the desktop with `-S --needed`,
+  throttles writeback, checks free space and refuses to run with a display manager enabled.
+- `scripts/upgrade-stick.sh`: the deliberate, guarded way to sysupgrade.
+- `scripts/repair-pacman-from-host.sh`: finishes an interrupted transaction from an x86_64 PC via qemu + chroot.
+- `install/install-usb.sh` disables the `sshd.service` the ARM image leaves enabled.
+
+The stick itself is healthy (57 GB, 7 % used, 50 GB free); the failure was I/O scheduling plus the panic policy, not
+disk space and not OOM (`Memory Limit: none`).
+
+## Console modes: `graphical` and `dm` (tty removed)
+
+Two installer options, recorded in `/etc/tarkin/console-mode`:
+
+- `graphical` (default): `tarkin-console` (`cage` + `foot`) owns the DRM node. `getty@tty1` is explicitly disabled so
+  it cannot draw over the compositor.
+- `dm`: SDDM (X11 greeter) owns the console, with XFCE as the default session and i3 in the session menu. Installed by
+  the installer itself (see below).
+
+`--console tty` existed for a while and has been **removed**. Reason, confirmed on the hardware: this kernel cannot show
+a text console at all -- the install-time guard (fbcon + `/dev/fb0` + `/dev/tty0`) fired on the real CM1406. A getty on
+`tty1` would run and draw nothing, so the mode could only ever produce a black panel. Removed files:
+`rootfs/etc/systemd/system/getty@tty1.service.d/autologin.conf`,
+`rootfs/etc/systemd/system/tarkin-tty-fallback.service`, `rootfs/usr/local/libexec/tarkin/tty-fallback`.
+
+### VT check pitfall: /dev/tty0 is not visible in every shell
+
+The installer originally refused `--console dm` whenever `/dev/tty0` was not a character device, and printed "this
+kernel has no VT layer". That was wrong in the shells people actually use: ChromeOS's crosh `shell` and the Linux
+container do not expose `/dev/tty0`, while the kernel has a complete VT layer (VT2 itself works). The check now looks at
+`/sys/class/tty/tty0` (kernel-provided, visible from any namespace) and only refuses when **both** it and `/dev/tty0`
+are missing; otherwise it warns and continues. It no longer refuses `--console dm` in any case: if the kernel really has no
+VT, SDDM fails and `tarkin-dm-fallback` lands on `tarkin-console`, so the wrong answer cannot brick the stick. `tarkin-vtcheck`
+and `preflight-tarkin.sh` report the two separately and say when the shell is the problem.
+
+## VTs exist, but nothing can draw on them
+
+Why SDDM used to say `Could not start display server on vt -1`, and why a text console is not an option:
+
+- `VT_OPENQRY` / `/dev/ttyN` prove the *VT layer* exists (that is what `vt -1` is about). It does exist here: ChromeOS
+  itself runs on VT2 on this machine, and the VT devices are present.
+- Text on a VT additionally needs `fbcon` registered **and** a framebuffer device (`/dev/fb0`). ChromeOS kernels
+  normally build out DRM fbdev emulation (`CONFIG_DRM_FBDEV_EMULATION`), because ChromeOS never displays a kernel text
+  console on the panel.
+- `cage`, Xorg and SDDM do their own KMS modesetting, which is why the graphical console (and a potential greeter) can
+  work on exactly the same kernel while a getty cannot.
+
+`tarkin-vtcheck` (`scripts/verify-vt.sh` from the repo) reports: `/dev/tty0`, number of VTs, `console/active`,
+`tty0/active`, whether `tarkin-console`/`getty@tty1`/`seatd` are enabled, who holds `/dev/tty[0-9]`, and the decisive
+`VT_OPENQRY` ioctl (0x5600) with a writable int, which is exactly what SDDM calls. `--activate ttyN` is opt-in: it
+switches the panel to that VT for 3 s and back, which is the only way to prove a VT console reaches the display; on a
+kernel without a VT console the panel can stay black, hence opt-in.
+
+Checked locally on the development host: 64 VT devices, `VT_OPENQRY` returns a free VT, `fgconsole` fails when not
+attached to a console (as expected). Non-root: the script refuses to run, since `/dev/tty0` needs root.
+
+Consequence for `dm`: a failed greeter leaves a black panel with no on-screen error. That is the one risk this mode
+carries, and it is why `graphical` remains the default.
+
+## `--console dm`: XFCE + i3 + SDDM in one pass
+
+Design, given that nothing can be shown or typed outside a display manager:
+
+Confirmed by the owner: on an earlier build SDDM did work, because `tarkin-console` was not working and SDDM had been
+enabled in systemd. So the earlier success is explained: the console stack was dead (`cage`/`foot` half-installed after
+the interrupted `-Syu`), nothing held the display, and `systemctl enable sddm` gave the greeter the console. That also
+proves the X11 greeter can draw on this panel. `--console dm` reproduces the state deliberately: `tarkin-console` is
+disabled and SDDM owns the display.
+
+- `--console dm` (installer) requires a VT layer only (a display manager needs a VT; it does NOT need fbcon because it
+  draws through DRM). If there is no fbcon it warns that a failed greeter is unrecoverable on screen.
+- The installer now installs the graphical stack **in the same chroot transaction** as the terminal packages:
+  `xorg-server`, `xorg-xinit`, `xorg-xauth`, `xf86-input-libinput`, `mesa`, `sddm`, the `xfce4` and
+  `xfce4-goodies` groups, and
+  `i3-wm`/`i3status`/`i3lock`/`dmenu`/`xterm`. Xorg/SDDM failing is non-fatal: the stick then boots to
+  `tarkin-console` and the summary says to run `bash ~/install-xfce.sh`.
+- Configuration is written by `scripts/install-xfce.sh --configs-only` against the mounted rootfs, so the installer and
+  the in-system repair path use the same code: `/etc/sddm.conf.d/10-tarkin.conf` with `DisplayServer=x11` (the Wayland
+  greeter needs EGL), `Session=xfce` in `/home/alarm/.dmrc`, and an i3 config if the user has none.
+- `display-manager.service` is created as the sddm alias; `tarkin-console` is disabled; `tarkin-dm-fallback.service` is
+  enabled. The fallback's job: after ~50 s, if `display-manager.service` is not active (or was never configured), start
+  `tarkin-console`. So a greeter that crashes or exits usually returns the terminal instead of leaving a black panel.
+- `scripts/install-xfce.sh` is the same install from inside the running system (repair path), with the same writeback
+  throttling and hung-task policy as `install-desktop.sh`, and no `-Syu`. It deliberately does not start SDDM from
+  inside the running compositor (two things would draw on the panel): reboot is the hand-over.
+- `tarkin-session` refuses to switch console sessions in dm mode and says how to go back to `graphical`.
+
+Known now: the X11 greeter draws on this panel (the owner's earlier build). Still untested: whether XFCE and i3 behave
+under software rendering at 1920x1200, and whether the greeter is stable across boots. If it misbehaves, the recovery is
+ChromeOS + mount + `rm display-manager.service` (or wait for `tarkin-dm-fallback`). The mode stays opt-in and `graphical`
+remains the default.

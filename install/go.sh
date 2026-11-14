@@ -9,7 +9,6 @@ usb_disks() {
   for d in /sys/block/sd*; do
     [[ -e "$d" ]] || continue
     name="$(basename "$d")"
-    [[ "$(cat "$d/removable" 2>/dev/null)" == 1 ]] || continue
     [[ "$(readlink -f "$d")" == *"/usb"* ]] || continue
     printf '%s %s %s\n' "$name" "$(lsblk -dno SIZE "/dev/$name" 2>/dev/null)" "$(lsblk -dno MODEL "/dev/$name" 2>/dev/null | tr ' ' '_')"
   done
@@ -37,6 +36,19 @@ fi
 echo "USB sticks:"
 for d in "${disks[@]}"; do printf '   /dev/%-8s %s\n' "${d%% *}" "${d#* }"; done
 default="/dev/${disks[0]%% *}"
+# Show the mode that install-usb.sh will actually use, not a fixed hint.
+cmode="${TARKIN_CONSOLE:-graphical}"
+prev=""
+for a in "$@"; do
+  case "$prev" in --console|-c) cmode="$a" ;; esac
+  case "$a" in --console=*|-c=*) cmode="${a#*=}" ;; esac
+  prev="$a"
+done
+case "$cmode" in
+  graphical) echo "Console   : graphical (tarkin-console: cage+foot on the DRM node)" ;;
+  dm)        echo "Console   : dm (SDDM login screen, XFCE + i3 sessions)" ;;
+  *)         echo "Console   : $cmode (install-usb.sh will reject this: use graphical or dm)" ;;
+esac
 read -r -p "Device to ERASE and install on [$default]: " DEV
 DEV="${DEV:-$default}"
 [[ "$DEV" == /dev/* ]] || DEV="/dev/$DEV"

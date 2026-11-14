@@ -8,7 +8,7 @@ DEV="${1:-}"; MODE="${2:-}"
 for c in futility dd cgpt rootdev lsblk; do command -v "$c" >/dev/null || die "Missing command: $c"; done
 [[ "$DEV" != "$(rootdev -s -d)" ]] || die "$DEV is the running ChromeOS disk."
 case "$DEV" in *mmcblk*) die "$DEV looks like the internal eMMC.";; esac
-[[ "$(lsblk -dno RM "$DEV" | tr -d ' ')" == 1 ]] || die "$DEV is not removable."
+[[ "$(readlink -f "/sys/class/block/$(basename "$DEV")")" == *"/usb"* ]] || die "$DEV is not a USB device."
 if [[ "$DEV" =~ [0-9]$ ]]; then P1="${DEV}p1"; else P1="${DEV}1"; fi
 [[ -b "$P1" ]] || die "$P1 not found."
 cgpt show -i 1 -t "$DEV" 2>/dev/null | grep -qi 'fe3a2a5d-4f32-41a7-b725-accc3285a309' \

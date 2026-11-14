@@ -1,0 +1,19 @@
+[Unit]
+Description=Tarkin: start the console if no display manager is running
+Documentation=file:///usr/local/libexec/tarkin/dm-fallback
+# Only enabled in --console dm mode. There is no text console on this kernel, so
+# a boot with no working display manager would be a black screen: this starts
+# tarkin-console instead (SDDM missing because its install failed, or the
+# greeter exited).
+After=display-manager.service systemd-user-sessions.service seatd.service
+Wants=seatd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/tarkin/dm-fallback
+TimeoutStartSec=90
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

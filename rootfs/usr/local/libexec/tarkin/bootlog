@@ -11,6 +11,9 @@ echo "== console groups";  grep '^SupplementaryGroups=' /etc/systemd/system/tark
 echo "== console journal"; journalctl -b -u tarkin-console.service -u seatd.service --no-pager 2>/dev/null | tail -80
 echo "== drm";             ls -l /dev/dri 2>&1; for c in /sys/class/drm/card*; do echo "$c -> $(readlink -f "$c/device/driver" 2>/dev/null)"; done
 echo "== input";           grep -E 'Name=|Handlers=' /proc/bus/input/devices
+echo "== hid drivers";     for h in /sys/bus/hid/devices/*; do [[ -e "$h" ]] && echo "$(basename "$h") -> $(basename "$(readlink -f "$h/driver" 2>/dev/null)")"; done
+echo "== hidraw";          ls -l /dev/hidraw* 2>/dev/null
+echo "== modules input";   lsmod | grep -E 'hid|i2c' || true
 echo "== network";         ip -br addr
 echo "== wlan0";           iw dev 2>/dev/null; wpa_cli -i wlan0 status 2>/dev/null
 echo "== pci";             lspci -nn 2>/dev/null

@@ -1,0 +1,34 @@
+#!/bin/bash
+# Display-manager mode: make sure the panel is never dead.
+#
+# `--console dm` means "a display manager owns the console". The installer
+# installs SDDM, but the transaction can fail (network, disk) and a greeter can
+# also die later: either way nothing would draw and the panel would be black.
+# This unit closes that hole from both sides:
+#
+#   - no display manager configured  -> start tarkin-console (cage + foot);
+#   - display manager configured but not running after ~50 s -> same fallback.
+#
+# It never touches a working greeter.
+set -u
+sleep 10
+
+have_dm=0
+[[ -e /etc/systemd/system/display-manager.service ]] && have_dm=1
+
+if (( have_dm )); then
+  for _ in $(seq 1 20); do
+    if systemctl is-active --quiet display-manager.service; then
+      echo "dm-fallback: display manager is running; leaving the screen to it."
+      exit 0
+    fi
+    sleep 2
+  done
+  echo "dm-fallback: display-manager.service is enabled but not running after ~50s" \
+       "(sddm failed? see: journalctl -u sddm -b). Starting tarkin-console so the panel is not black."
+else
+  echo "dm-fallback: no display manager configured. Starting tarkin-console (cage + foot)."
+  echo "dm-fallback: install the desktop with:  bash ~/install-xfce.sh"
+fi
+
+systemctl --no-block start tarkin-console.service

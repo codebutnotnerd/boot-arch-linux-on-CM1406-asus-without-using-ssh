@@ -11,6 +11,11 @@ if [[ ! -d "$XDG_RUNTIME_DIR" ]]; then
   echo "tarkin-console: $XDG_RUNTIME_DIR missing after ${n}s (user manager not running? check linger)" >&2
   exit 1
 fi
+# This is a *system* service, not a logind session: systemd does not export
+# the session bus address for us. Without it GTK/portal apps (and anything a
+# desktop launches: fuzzel -> gtk app, mako, thunar, ...) cannot reach the
+# user D-Bus and fail or hang.
+export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
 export LIBSEAT_BACKEND=seatd SEATD_VTBOUND=0
 export LANG=C.UTF-8
 export WLR_RENDERER=pixman WLR_NO_HARDWARE_CURSORS=1

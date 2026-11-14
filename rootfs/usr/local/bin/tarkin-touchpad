@@ -1,0 +1,66 @@
+#!/bin/bash
+# Diagnose the Tarkin touchpad (ELAN I2C-HID, HID id 04F3:31C6).
+#
+# Read-only. It answers the one question that decides whether the touchpad can
+# feel right: does libinput see a *touchpad* (taps, two-finger scroll, palm
+# rejection) or just a mouse?
+#
+#   tarkin-touchpad
+set -u
+VID_PID="04F3:31C6"
+VID="${VID_PID%%:*}"
+
+echo "== HID devices"
+found=0
+for h in /sys/bus/hid/devices/*; do
+  [[ -e "$h" ]] || continue
+  id="$(basename "$h")"
+  case "$id" in
+    *${VID_PID}*|*"${VID}:"*) ;;
+    *) continue ;;
+  esac
+  found=1
+  drv="$(basename "$(readlink -f "$h/driver" 2>/dev/null)")"
+  echo "   $id -> driver: ${drv:-none}"
+  case "$drv" in
+    hid-multitouch) echo "      OK: hid-multitouch owns it (libinput should classify it as a touchpad)" ;;
+    hid-generic)    echo "      PROBLEM: hid-generic owns it. Expect no multitouch, jumpy absolute pointer, no two-finger scroll." ;;
+    "")             echo "      PROBLEM: no driver bound." ;;
+    *)              echo "      note: unusual driver '$drv'" ;;
+  esac
+done
+(( found )) || echo "   (no 04F3:31C6 HID device found; is this the CM1406?)"
+
+echo
+echo "== input device"
+awk 'BEGIN{RS=""} /04F3:31C6|Touchpad/ {print}' /proc/bus/input/devices 2>/dev/null \
+  | grep -E 'Name=|Handlers=|EV=|ABS_MT|KEY=' | sed 's/^/   /'
+
+echo
+echo "== libinput classification"
+if command -v libinput >/dev/null 2>&1; then
+  if [[ $EUID -eq 0 ]]; then
+    libinput list-devices 2>/dev/null | awk '/^Device:/{d=$0} /^Capabilities:/{getline c; print d"\n    "c}'
+  else
+    echo "   run as root to see this: sudo tarkin-touchpad"
+  fi
+  echo "   live events: sudo libinput debug-events --show-keycodes"
+else
+  echo "   'libinput' not installed: sudo pacman -S libinput"
+fi
+
+cat <<'EOF'
+
+== What to do
+* If hid-multitouch owns it: the hardware is fine, tune libinput instead
+  (tap-to-click, scroll speed, accel) in ~/.config/labwc/rc.xml <libinput>.
+* If hid-generic owns it, try rebinding by hand (not persistent, undo by reboot):
+      id=/sys/bus/hid/devices/0018:04F3:31C6.*        # from above
+      echo -n "$(basename $id)" | sudo tee /sys/bus/hid/drivers/hid-generic/unbind
+      echo -n "$(basename $id)" | sudo tee /sys/bus/hid/drivers/hid-multitouch/bind
+  This is done at every boot by tarkin-touchpad.service. Check it with:
+      systemctl status tarkin-touchpad; journalctl -u tarkin-touchpad -b
+* If events are crisp under 'libinput debug-events' but the pointer feels laggy
+  in the session, it is not the touchpad: it is the software renderer
+  (WLR_RENDERER=pixman at 1920x1200). Nothing to fix in the input layer.
+EOF

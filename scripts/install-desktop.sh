@@ -24,12 +24,41 @@ if (( ! CONFIGS_ONLY )); then
   sudo -v || die "sudo needs your password (the account alarm: default password alarm unless you changed it)."
   getent hosts mirror.archlinuxarm.org >/dev/null || die "No network (cannot resolve mirror.archlinuxarm.org). Connect first: sudo tarkin-wifi \"NetworkName\"."
 
-  info "Updating the system and installing the desktop (this takes a few minutes)..."
-  sudo pacman -Syu --noconfirm
-  PKGS=(labwc waybar fuzzel swaybg mako foot papirus-icon-theme adw-gtk-theme inter-font noto-fonts noto-fonts-emoji pcmanfm-gtk3 wlr-randr)
+  # This system lives on a USB stick. A full `pacman -Syu` leaves hundreds of
+  # MB of dirty pages; if the stick cannot flush them within the hung-task
+  # timeout, the kernel used to panic ("hung_task: blocked tasks") and reboot
+  # in the middle of the transaction. That left the console stack
+  # half-installed and the screen black. Never let a slow flush kill the box,
+  # and keep the backlog small.
+  info "Throttling writeback and disabling panic-on-hung-task..."
+  sudo sysctl -w kernel.hung_task_panic=0 >/dev/null 2>&1 || warn "could not set kernel.hung_task_panic"
+  sudo sysctl -w vm.dirty_background_bytes=8388608 >/dev/null 2>&1 || true
+  sudo sysctl -w vm.dirty_bytes=33554432 >/dev/null 2>&1 || true
+
+  avail_kb="$(df -Pk / | awk 'NR==2 {print $4}')"
+  (( avail_kb >= 2 * 1048576 )) \
+    || die "Only $((avail_kb / 1024)) MiB free on /: the desktop needs about 2 GiB. Free space or use a bigger stick."
+
+  if [[ -e /etc/systemd/system/display-manager.service ]]; then
+    warn "A display manager is enabled: $(readlink -f /etc/systemd/system/display-manager.service)"
+    warn "It will fight tarkin-console for the only DRM node and give a black screen."
+    warn "Disable it first: sudo systemctl disable --now <that-service>"
+  fi
+
+  # Touchpad: make sure the I2C-HID / multitouch layers are loaded, otherwise
+  # the Elan trackpad (04F3:31C6) falls back to a clumsy generic mouse.
+  printf 'i2c-hid\nhid-multitouch\n' | sudo tee /etc/modules-load.d/tarkin-input.conf >/dev/null
+  sudo modprobe i2c-hid 2>/dev/null || true
+  sudo modprobe hid-multitouch 2>/dev/null || true
+
+  info "Installing the desktop (deliberately NOT a full -Syu on a USB rootfs)..."
+  # Do not run `pacman -Syu` here: a sysupgrade rewrites glibc, systemd and
+  # wlroots and needs a very large flush, which is what broke the stick.
+  # To upgrade the system safely, use scripts/upgrade-stick.sh instead.
+  PKGS=(labwc waybar fuzzel swaybg mako foot papirus-icon-theme adw-gtk-theme inter-font noto-fonts noto-fonts-emoji pcmanfm-gtk3 wlr-randr libinput)
   for p in "${PKGS[@]}"; do
     if pacman -Si "$p" >/dev/null 2>&1; then
-      sudo pacman -S --needed --noconfirm "$p" || warn "Could not install $p (skipped)."
+      sudo pacman -S --needed --noconfirm --ignore linux-aarch64,linux-aarch64-headers "$p" || warn "Could not install $p (skipped)."
     else
       warn "$p is not available for this architecture (skipped)."
     fi
@@ -53,6 +82,7 @@ if [[ ! -d "$XDG_RUNTIME_DIR" ]]; then
   exit 1
 fi
 export LIBSEAT_BACKEND=seatd SEATD_VTBOUND=0
+export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
 export LANG=C.UTF-8
 export WLR_RENDERER=pixman WLR_NO_HARDWARE_CURSORS=1
 n=0
@@ -113,6 +143,22 @@ put "$CFG/labwc/rc.xml" <<'EOF'
     <font place="InactiveWindow"><name>Inter</name><size>11</size></font>
     <font place="MenuItem"><name>Inter</name><size>12</size></font>
   </theme>
+  <!-- Touchpad (ELAN I2C-HID 04F3:31C6). Stock libinput defaults feel bad on
+       this panel: taps are off and the pointer is over-accelerated.
+       Element names follow `man labwc-config`; unknown ones are ignored. -->
+  <libinput>
+    <device category="touchpad">
+      <tap>yes</tap>
+      <tapButtonMap>lrm</tapButtonMap>
+      <tapDrag>yes</tapDrag>
+      <naturalScroll>no</naturalScroll>
+      <scrollFactor>0.5</scrollFactor>
+      <accelProfile>adaptive</accelProfile>
+      <pointerSpeed>-0.2</pointerSpeed>
+      <middleEmulation>yes</middleEmulation>
+      <disableWhileTyping>yes</disableWhileTyping>
+    </device>
+  </libinput>
   <keyboard>
     <default />
     <keybind key="W-d"><action name="Execute"><command>fuzzel</command></action></keybind>

@@ -1,0 +1,184 @@
+#!/bin/bash
+# Does this kernel really provide virtual terminals (VTs)?
+#
+# SDDM, getty, and anything else that wants "the console" needs VTs. When they
+# are missing or all taken you get exactly:
+#
+#     sddm: Could not start display server on vt -1
+#
+# This script answers that question without changing anything: it never
+# switches VT and never starts a service. Run it as root on the machine whose
+# kernel you care about (the stick, or ChromeOS -- same kernel, same answer):
+#
+#     sudo tarkin-vtcheck
+#
+# Optional, and destructive-ish: prove that a VT actually reaches the panel.
+#
+#     sudo tarkin-vtcheck --activate tty2
+#
+# That switches the screen to /dev/tty2 for 3 seconds and then back. If the
+# kernel has no VT console (no fbcon), the screen can stay black -- you would
+# have to power cycle. That is why it is not the default.
+set -u
+[[ $EUID -eq 0 ]] || { echo "Run it as root: sudo tarkin-vtcheck" >&2; exit 1; }
+rc=0
+ok()   { printf '  [ok]   %s\n' "$*"; }
+bad()  { printf '  [FAIL] %s\n' "$*"; rc=1; }
+note() { printf '  [info] %s\n' "$*"; }
+
+MODE="$(cat /etc/tarkin/console-mode 2>/dev/null || echo unknown)"
+
+echo "== system"
+echo "  kernel:      $(uname -r)"
+echo "  console mode on this install: $MODE  (graphical = tarkin-console, dm = sddm greeter)"
+echo "  booted via:  $(cat /proc/cmdline | tr ' ' '\n' | grep -E '^(console|init)=' | tr '\n' ' ')"
+
+echo "== VT devices"
+sys=0; [[ -d /sys/class/tty/tty0 ]] && sys=1
+dev=0; [[ -c /dev/tty0 ]] && dev=1
+if (( sys && dev )); then
+  ok "/dev/tty0 exists"
+elif (( sys )); then
+  bad "/dev/tty0 is not visible from this shell, but the kernel has the VT driver (/sys/class/tty/tty0). This looks like a sandbox/container, not a kernel without CONFIG_VT: run this from VT2."
+else
+  bad "the kernel has no VT layer: /sys/class/tty/tty0 and /dev/tty0 are both missing (CONFIG_VT off)"
+fi
+n=0
+for t in /dev/tty[0-9]*; do [[ -c "$t" ]] && n=$((n+1)); done
+if (( n > 0 )); then ok "$n VT devices (/dev/tty0..)"; elif (( sys )); then note "no /dev/ttyN in this shell (sandbox); the kernel still has them"; else bad "no /dev/ttyN devices"; fi
+(( sys )) && ok "/sys/class/tty/tty0 exists (VT driver registered in the kernel)" || bad "/sys/class/tty/tty0 is missing"
+[[ -r /proc/consoles ]] && ok "/proc/consoles: $(tr '\n' ' ' < /proc/consoles | tr -s ' ')" || note "/proc/consoles unreadable"
+
+echo "== VT text console (fbcon): could a VT draw on this panel?"
+# This is the difference between "VTs exist" and "the panel could show text on
+# a VT". fbcon needs a registered vtconsole *and* a framebuffer device; ChromeOS
+# kernels usually disable DRM fbdev emulation, so VTs exist with nothing to
+# draw them. A display manager does not need fbcon (it draws through DRM), but
+# if it fails, no fbcon means there is no on-screen error to read.
+fbcon=0
+for f in /sys/class/vtconsole/vtcon*; do
+  [[ -r "$f/name" ]] || continue
+  nm="$(cat "$f/name" 2>/dev/null)"
+  note "$(basename "$f"): $nm"
+  [[ "$nm" == *frame\ buffer* ]] && fbcon=1
+done
+[[ -e /sys/class/graphics/fb0 ]] && fbdev=1 || fbdev=0
+[[ -c /dev/tty0 ]] && vtdev=1 || vtdev=0
+[[ -r /proc/fb ]] && note "/proc/fb: $(tr '\n' ' ' < /proc/fb)"
+if (( fbcon )); then ok "fbcon is registered (VTs can draw text)"; else bad "fbcon is NOT registered: a VT would show nothing"; fi
+if (( fbdev )); then ok "framebuffer /dev/fb0 available"; else bad "no /sys/class/graphics/fb0 (no framebuffer: fbcon has nothing to draw on)"; fi
+if (( fbcon && fbdev && vtdev )); then
+  note "=> a text console is possible here (a failed greeter could be diagnosed on screen)"
+else
+  note "=> no text console on this kernel: a failed greeter leaves a black panel,"
+  note "   with no on-screen error (tarkin-dm-fallback can only restart tarkin-console)"
+fi
+
+echo "== active console"
+a="$(cat /sys/class/tty/console/active 2>/dev/null || true)"
+[[ -n "$a" ]] && note "console/active: $a" || bad "console/active is empty (this kernel may boot with no console at all)"
+t0="$(cat /sys/class/tty/tty0/active 2>/dev/null || true)"
+[[ -n "$t0" ]] && note "tty0/active: $t0" || note "tty0/active is empty (normal when no VT is foreground)"
+command -v fgconsole >/dev/null 2>&1 && note "fgconsole: $(fgconsole 2>&1)"
+
+echo "== VT_OPENQRY (the exact ioctl SDDM uses for 'vt -1')"
+# VT_OPENQRY = 0x5600: the kernel writes the first free VT number into the
+# argument. Read-only: it does not switch anything.
+free_vt=""
+if command -v python3 >/dev/null 2>&1; then
+  free_vt="$(python3 - <<'PY' 2>&1
+import array, fcntl, os, sys
+try:
+    fd = os.open("/dev/tty0", os.O_RDWR | os.O_NOCTTY)
+except OSError as e:
+    print("open:/dev/tty0:%s" % e.strerror); sys.exit(0)
+buf = array.array("i", [0])
+try:
+    fcntl.ioctl(fd, 0x5600, buf, True)   # VT_OPENQRY
+    print("ok:%d" % buf[0])
+except OSError as e:
+    print("ioctl:%s" % e.strerror)
+finally:
+    os.close(fd)
+PY
+)"
+  case "$free_vt" in
+    ok:*)
+      v="${free_vt#ok:}"
+      if (( v > 0 )); then
+        ok "VT_OPENQRY says VT$v is free (SDDM would use VT$v, not -1)"
+      else
+        bad "VT_OPENQRY returned $v (no free VT: something already holds every one)"
+      fi ;;
+    ioctl:*)
+      bad "VT_OPENQRY failed: ${free_vt#ioctl:} (SDDM reports this as 'vt -1')" ;;
+    open:*)
+      if (( sys )); then
+        bad "cannot open /dev/tty0: ${free_vt#open:} -- the kernel has VTs (sysfs shows tty0), so this shell is sandboxed; run from VT2"
+      else
+        bad "cannot open /dev/tty0: ${free_vt#open:}"
+      fi ;;
+    *)
+      note "unexpected python output: $free_vt" ;;
+  esac
+else
+  note "python3 not installed: skipped the ioctl test (install python or rely on the checks above)"
+  [[ -c /dev/tty0 ]] && note "VT devices exist, but a free-VT query could not be made"
+fi
+
+echo "== what is holding the console"
+if command -v systemctl >/dev/null 2>&1; then
+  note "tarkin-console: $(systemctl is-enabled tarkin-console.service 2>/dev/null || echo not-installed) / $(systemctl is-active tarkin-console.service 2>/dev/null || echo inactive)"
+  note "getty@tty1:     $(systemctl is-enabled getty@tty1.service 2>/dev/null || echo not-installed) / $(systemctl is-active getty@tty1.service 2>/dev/null || echo inactive)"
+  note "seatd:          $(systemctl is-active seatd.service 2>/dev/null || echo inactive)"
+  command -v loginctl >/dev/null 2>&1 && note "logind sessions: $(loginctl list-sessions --no-legend 2>/dev/null | wc -l)"
+fi
+command -v fuser >/dev/null 2>&1 && { echo "  -- who has /dev/tty0..9 open --"; fuser -v /dev/tty[0-9] 2>&1 | sed 's/^/  /'; }
+
+# ---- optional: actually switch the screen to a VT and back -----------------
+if [[ "${1:-}" == "--activate" ]]; then
+  want="${2:-tty2}"
+  num="${want#tty}"
+  if [[ ! "$num" =~ ^[0-9]+$ ]]; then echo "[-] usage: tarkin-vtcheck --activate ttyN" >&2; exit 2; fi
+  back="$(cat /sys/class/tty/tty0/active 2>/dev/null || echo tty1)"
+  cat <<WARN
+
+== screen test: switching to $want for 3 seconds, then back to $back
+   Look at the panel NOW. If it goes black and stays black, this kernel has no
+   VT console on this display: power cycle (nothing is being written).
+WARN
+  vtioctl() { python3 - "$1" "$2" <<'PY' 2>&1
+import fcntl, os, sys
+op = {"activate": 0x5606, "wait": 0x5607}[sys.argv[1]]
+num = int(sys.argv[2])
+fd = os.open("/dev/tty0", os.O_RDWR | os.O_NOCTTY)
+fcntl.ioctl(fd, op, num)          # both take the VT number by value
+os.close(fd)
+PY
+  }
+  if command -v python3 >/dev/null 2>&1; then
+    vtioctl activate "$num" || bad "VT_ACTIVATE $num failed"
+    sleep 3
+    vtioctl activate "${back#tty}" || bad "could not switch back to $back"
+    vtioctl wait "${back#tty}" || true
+    echo "  done: you should be back on $back (or on the desktop)."
+  else
+    note "python3 not installed: cannot run the screen test"
+  fi
+fi
+
+echo
+if (( rc == 0 )); then
+  echo "[+] VTs look usable on this kernel."
+  [[ "$MODE" == graphical ]] && echo "    Console mode is 'graphical': tarkin-console owns the display, so SDDM/Xorg cannot take it."
+  [[ "$MODE" == dm ]] && echo "    Console mode is 'dm': SDDM should get a VT; if it does not, check 'vt -1' above."
+else
+  echo "[-] Something above FAILED:"
+  if (( ! fbcon || ! fbdev )); then
+    echo "    - no text console: errors are invisible on screen. A display manager can still work (it draws through DRM),"
+    echo "      but if it fails the panel is simply black."
+  fi
+  (( vtdev )) || echo "    - no /dev/tty0: no display manager can get a VT on this kernel"
+  echo "    - see the VT_OPENQRY line for whether a display manager can get a VT at all."
+fi
+exit "$rc"
