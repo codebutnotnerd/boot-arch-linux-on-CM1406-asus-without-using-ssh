@@ -1,4 +1,4 @@
-# Arch Linux ARM on the ASUS Chromebook CM1406 (no SSH)
+# Arch Linux ARM on the ASUS Chromebook CM1406 
 
 This boots Arch Linux ARM from a USB stick on the ASUS Chromebook CM1406 (board `google,tarkin`, MediaTek MT8189,
 eMMC). ChromeOS stays on the internal storage and is never touched. Unplug the stick and the machine boots ChromeOS
@@ -28,8 +28,8 @@ Written but not tested on the hardware as a whole: the `labwc` desktop (`waybar`
 SDDM. The **X11 SDDM greeter itself has been seen working** on this machine (in a build where `tarkin-console` was not
 running), so the greeter can draw on this panel; `--console dm` just makes that state deliberate.
 
-Not tested at all: audio, Bluetooth, suspend, touchscreen and brightness keys. The GPU is not used (see
-the GPU section).
+Reported working by testers: Bluetooth with audio, and the keyboard backlight LEDs. Not tested at all: suspend,
+touchscreen and brightness keys. The GPU is not used (see the GPU section).
 
 The touchpad (Elan I2C-HID `04F3:31C6`) is detected and usable, but it is not tuned: it runs on stock `libinput`, not
 ChromeOS's gesture library, so taps, scroll speed and palm rejection feel different. See [Touchpad](#touchpad).
