@@ -1,5 +1,6 @@
 *.zip
-*.tar*
+*.tar
+*.tar.*
 *.bin
 *.pub
 report.txt
