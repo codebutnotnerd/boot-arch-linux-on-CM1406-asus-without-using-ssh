@@ -11,7 +11,7 @@ if [[ -z "$DEV" ]]; then
     [[ -e "$d" && "$(readlink -f "$d")" == *"/usb"* ]] && { DEV="/dev/$(basename "$d")"; break; }
   done
 fi
-[[ -b "$DEV" ]] || { echo "[-] No USB drive (stick or external SSD) found. Plug it in (and try another port) or pass /dev/sdX." >&2; dmesg | tail -8; exit 1; }
+[[ -b "$DEV" ]] || { echo "[-] No USB stick found. Plug it in (and try another port) or pass /dev/sdX." >&2; dmesg | tail -8; exit 1; }
 case "$DEV" in *mmcblk*) echo "[-] Refusing the internal disk." >&2; exit 1;; esac
 P1="${DEV}1"; P2="${DEV}2"; [[ "$DEV" =~ [0-9]$ ]] && { P1="${DEV}p1"; P2="${DEV}p2"; }
 echo "== Stick: $DEV"
@@ -44,7 +44,7 @@ echo "== Root filesystem"
 M="$(mktemp -d /var/tmp/chk-root.XXXXXX)"
 if mount -o ro "$P2" "$M" 2>/dev/null; then
   PU="$(blkid -s PARTUUID -o value "$P2")"
-  if [[ -n "$PU" && "$(grep -c "$PU" "$M/etc/fstab" 2>/dev/null || echo 0)" -ge 1 ]]; then
+  if [[ -n "$PU" ]] && grep -qs "$PU" "$M/etc/fstab"; then
     ok "fstab matches the root PARTUUID"
   else
     warn "fstab does not match the root PARTUUID: the kernel will not find the root (kernel panic at boot)"
@@ -52,39 +52,14 @@ if mount -o ro "$P2" "$M" 2>/dev/null; then
   [[ -x "$M/usr/bin/cage" && -x "$M/usr/bin/foot" && -x "$M/usr/bin/seatd" ]] && ok "cage, foot and seatd installed" || warn "cage/foot/seatd NOT installed: no on-screen terminal (re-run the installer with working internet)"
   [[ -f "$M/etc/wpa_supplicant/wpa_supplicant-wlan0.conf" ]] && ok "Wi-Fi configuration present" || echo "  [info]    no Wi-Fi configured (use: sudo tarkin-wifi \"Name\" in the terminal)"
   [[ -x "$M/usr/bin/wpa_supplicant" ]] && ok "wpa_supplicant installed" || warn "wpa_supplicant NOT installed: the stick will have no Wi-Fi tools (re-run the installer with working internet)"
-  cmode="$(cat "$M/etc/tarkin/console-mode" 2>/dev/null || echo graphical)"
-  if [[ "$cmode" == dm ]]; then
-    ok "console mode: dm (a display manager owns the console)"
-    [[ -e "$M/etc/systemd/system/multi-user.target.wants/tarkin-dm-fallback.service" ]] \
-      && ok "tarkin-dm-fallback enabled (starts tarkin-console when no display manager runs)" \
-      || warn "tarkin-dm-fallback is NOT enabled: if the display manager fails, the panel stays black"
-    if [[ -e "$M/etc/systemd/system/display-manager.service" ]]; then
-      ok "display manager enabled: $(basename "$(readlink -f "$M/etc/systemd/system/display-manager.service")")"
-      [[ -f "$M/etc/sddm.conf.d/10-tarkin.conf" ]] \
-        && ok "sddm configured for the X11 greeter (software rendering)" \
-        || warn "no /etc/sddm.conf.d/10-tarkin.conf: sddm may try the Wayland greeter, which needs EGL"
-      [[ -x "$M/usr/bin/Xorg" && -x "$M/usr/bin/sddm" ]] \
-        && ok "Xorg and sddm installed" \
-        || warn "Xorg/sddm missing from the rootfs: the greeter cannot start (run 'bash ~/install-xfce.sh' on the stick)"
-      [[ -f "$M/home/alarm/.dmrc" ]] \
-        && ok "XFCE set as the default session for alarm" \
-        || echo "  [info]    no /home/alarm/.dmrc: sddm will offer the session menu without a default"
-    else
-      echo "  [info]    no display manager enabled: the stick boots to tarkin-console. Run 'bash ~/install-xfce.sh' on it"
-    fi
-    [[ -e "$M/etc/systemd/system/multi-user.target.wants/tarkin-console.service" ]] \
-      && warn "tarkin-console is also enabled while a display manager is in charge: they will fight over the DRM node (black screen). Use 'systemctl disable tarkin-console'"
-  else
-    [[ -e "$M/etc/systemd/system/multi-user.target.wants/tarkin-console.service" && -e "$M/etc/systemd/system/multi-user.target.wants/seatd.service" ]] && ok "console and seatd services enabled" || warn "console/seatd services not enabled"
-  fi
-  if [[ "$cmode" == graphical ]]; then
-    [[ -s "$M/etc/tarkin/console.env" ]] && ok "keyboard layout: $(cat "$M/etc/tarkin/console.env")" || warn "keyboard layout file missing"
-  fi
+  [[ -e "$M/etc/systemd/system/multi-user.target.wants/tarkin-console.service" && -e "$M/etc/systemd/system/multi-user.target.wants/seatd.service" ]] && ok "console and seatd services enabled" || warn "console/seatd services not enabled"
+  [[ -s "$M/etc/tarkin/console.env" ]] && ok "keyboard layout: $(cat "$M/etc/tarkin/console.env")" || warn "keyboard layout file missing"
+  [[ -x "$M/usr/local/libexec/tarkin/touchpad-bind" && -e "$M/etc/systemd/system/multi-user.target.wants/tarkin-touchpad.service" ]] && ok "touchpad rebind service enabled" || echo "  [info]    tarkin-touchpad.service is not enabled: the touchpad may stay on hid-generic"
   kv="$(uname -r)"; [[ -d "$M/usr/lib/modules/$kv" ]] && ok "kernel modules for $kv present" || warn "modules for $kv missing"
   ls "$M/usr/lib/firmware/updates/mediatek/mt7925/" >/dev/null 2>&1 && ok "MT7925 firmware present" || warn "MT7925 firmware missing"
 
   svc="$M/etc/systemd/system/tarkin-console.service"
-  if [[ -f "$svc" && "$cmode" != dm ]]; then
+  if [[ -f "$svc" ]]; then
     suser="$(sed -n 's/^User=//p' "$svc" | head -1)"
     sgroup="$(sed -n 's/^Group=//p' "$svc" | head -1)"
     sgroups="$(sed -n 's/^SupplementaryGroups=//p' "$svc" | head -1)"
@@ -102,29 +77,6 @@ if mount -o ro "$P2" "$M" 2>/dev/null; then
   else
     warn "tarkin-console.service not found in the rootfs"
   fi
-
-  sysctl_file="$M/etc/sysctl.d/90-tarkin-panic.conf"
-  if grep -qE '^[[:space:]]*kernel\.hung_task_panic[[:space:]]*=[[:space:]]*0' "$sysctl_file" 2>/dev/null; then
-    ok "panic-on-hung-task disabled (a slow USB flush can no longer reboot mid-transaction)"
-  else
-    warn "kernel.hung_task_panic is NOT 0 in $sysctl_file: a slow USB writeback can panic and reboot in the middle of a pacman transaction (this is what left the screen black). Re-run the installer or add: kernel.hung_task_panic = 0"
-  fi
-
-  if [[ -e "$M/etc/systemd/system/multi-user.target.wants/sshd.service" ]]; then
-    warn "sshd is enabled on the stick and the default account is alarm/alarm: disable it (mount the root rw, rm that symlink)"
-  else
-    ok "sshd is not enabled"
-  fi
-  if [[ "$cmode" == graphical && -e "$M/etc/systemd/system/display-manager.service" ]]; then
-    warn "a display manager is enabled on the stick: it will fight seatd/tarkin-console for the DRM node (black screen). Reinstall with --console dm if you want one"
-  fi
-
-  [[ -f "$M/etc/modules-load.d/tarkin-input.conf" ]] \
-    && ok "touchpad modules requested at boot (i2c-hid, hid-multitouch)" \
-    || echo "  [info]    no /etc/modules-load.d/tarkin-input.conf: the Elan touchpad may bind to the generic HID driver"
-  [[ -x "$M/usr/local/libexec/tarkin/touchpad-bind" && -f "$M/etc/systemd/system/tarkin-touchpad.service" ]] \
-    && ok "touchpad rebind service present (tarkin-touchpad.service)" \
-    || echo "  [info]    tarkin-touchpad.service is missing: the touchpad may stay on hid-generic"
 
   if [[ -f "$M/var/log/tarkin-boot.log" ]]; then
     echo "== Last boot report from the stick (/var/log/tarkin-boot.log, first 40 lines)"; head -40 "$M/var/log/tarkin-boot.log"

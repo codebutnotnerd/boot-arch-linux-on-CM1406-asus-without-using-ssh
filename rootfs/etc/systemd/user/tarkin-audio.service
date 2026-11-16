@@ -1,0 +1,11 @@
+[Unit]
+Description=Route the built-in speakers and set the default sink
+After=wireplumber.service pipewire-pulse.service
+
+[Service]
+Type=oneshot
+TimeoutStartSec=120
+ExecStart=/usr/local/libexec/tarkin/audio-profile
+
+[Install]
+WantedBy=default.target

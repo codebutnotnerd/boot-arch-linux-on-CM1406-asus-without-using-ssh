@@ -5,9 +5,6 @@ DEV=""
 ALARM_SOURCE="${ALARM_ARCHIVE:-}"
 ALARM_CUSTOM=0
 KEYMAP="${KEYMAP:-fr}"
-# graphical = tarkin-console (cage + foot on the DRM node, no VT)
-# dm        = a display manager (sddm) owns the console; XFCE + i3 installed
-CONSOLE="${TARKIN_CONSOLE:-${CONSOLE:-graphical}}"
 USER_PASS=""
 WIFI_SSID="${WIFI_SSID:-}"
 WIFI_PASS="${WIFI_PASS:-}"
@@ -94,8 +91,6 @@ while [[ $# -gt 0 ]]; do
     --alarm|-a)     ALARM_SOURCE="${2:?missing value for $1}"; ALARM_CUSTOM=1; shift 2 ;;
     --keymap|-k)    KEYMAP="${2:?missing value for $1}"; shift 2 ;;
     --wifi-ssid|-s) WIFI_SSID="${2:?missing value for $1}"; shift 2 ;;
-    --console|-c)   CONSOLE="${2:?missing value for $1}"; shift 2 ;;
-    --console=*|-c=*) CONSOLE="${1#*=}"; shift ;;
     --wifi-pass|-w) die "Do not pass Wi-Fi passwords on the command line; the installer prompts for it." ;;
     -h|--help)
       cat <<'USAGE'
@@ -106,19 +101,13 @@ Options:
   --wifi-ssid, -s <ssid>          Wi-Fi network (WPA2-PSK); the passphrase is prompted. Default: the network
                                   saved in ChromeOS, if any.
   --keymap,  -k <layout>          Keyboard layout of the on-screen terminal (xkb name: fr, us, de, ...). Default: fr
-  --console, -c graphical|dm     What owns the display at boot.
-                                  graphical (default): tarkin-console, i.e. cage + foot on the DRM node.
-                                  dm: SDDM with XFCE (default session) and i3 (fallback session).
-                                       Needs a VT layer (/dev/tty0) but not fbcon: the greeter draws
-                                       through DRM/X. If it fails, tarkin-dm-fallback starts
-                                       tarkin-console after ~50 s.
 Environment:
   CONFIRM_ERASE=/dev/sdX  required, must equal the target device
-  TARKIN_CONSOLE=dm       same as --console dm (handy through `sudo env ...`)
   ALLOW_NO_WIFI=1         allow an install without any Wi-Fi configuration
   WIFI_COUNTRY=FR         optional two-letter regulatory domain written to wpa_supplicant
   ALLOW_NO_PKGS=1         skip the network check and the Wi-Fi tools (the stick then has no on-screen terminal)
   ALLOW_INSECURE_HTTP=1   accept a rootfs downloaded over plain http without a verifiable GPG signature
+  ALLOW_UNSIGNED_MIRROR=1 accept a rootfs from a mirror other than archlinuxarm.org without a verifiable GPG signature
   FORCE_BOARD=1           skip the "this is a google,tarkin board" check
 USAGE
       exit 0 ;;
@@ -128,53 +117,6 @@ USAGE
 done
 
 [[ -n "$DEV" ]]       || die "Usage: sudo $0 [options] /dev/sdX"
-case "$CONSOLE" in
-  graphical|dm) ;;
-  *) die "--console must be 'graphical' (cage+foot, default) or 'dm' (display manager + XFCE/i3). Got: $CONSOLE" ;;
-esac
-
-# A display manager needs a VT to activate (this is exactly what 'vt -1' means),
-# but it draws through DRM/X, so it does not need fbcon. Only the VT layer matters.
-#
-# Do NOT decide this from /dev/tty0 alone: some ChromeOS shells (crosh `shell`,
-# the Linux container, a sandbox) do not expose /dev/tty0 even though the kernel
-# has a perfectly good VT layer -- VT2 itself proves it. /sys/class/tty/tty0
-# comes from the kernel, so it is visible from every namespace.
-if [[ "$CONSOLE" == dm ]]; then
-  vt_sys=0; vt_dev=0
-  [[ -d /sys/class/tty/tty0 ]] && vt_sys=1
-  [[ -c /dev/tty0 ]] && vt_dev=1
-  if (( ! vt_sys && ! vt_dev )); then
-    cat >&2 <<'EOF'
-[!] No VT driver is visible from this shell: neither /sys/class/tty/tty0 nor
-    /dev/tty0. That usually means a sandbox that exposes neither (some ChromeOS
-    shells and containers), not a kernel without VTs. Continuing anyway:
-      - if the kernel has VTs (your working VT2 proves it does), SDDM works;
-      - if it truly has none, SDDM fails and tarkin-dm-fallback starts
-        tarkin-console instead, so the panel is not dead.
-    The authoritative check, from VT2 (Ctrl+Alt+Refresh):
-        sudo bash scripts/verify-vt.sh
-EOF
-  elif (( ! vt_dev )); then
-    cat >&2 <<'EOF'
-[!] /dev/tty0 is not visible from this shell, but the kernel exposes tty0 in
-    sysfs: this is the shell's namespace (crosh / the Linux container), not the
-    kernel. Continuing, because the booted stick gets its own /dev.
-    The authoritative check, from VT2 (Ctrl+Alt+Refresh):
-        sudo bash scripts/verify-vt.sh
-EOF
-  fi
-  if ! grep -qi 'frame buffer' /sys/class/vtconsole/vtcon*/name 2>/dev/null; then
-    cat >&2 <<'EOF'
-[!] No text console on this kernel (no fbcon/framebuffer).
-    The SDDM greeter may still work -- it draws through DRM -- but if it fails
-    there is no console to read or type on: the panel is simply black and the
-    only way back is a power cycle and ChromeOS. tarkin-dm-fallback starts
-    tarkin-console when no display manager is running, which covers the usual
-    failures but not a greeter that starts and cannot draw.
-EOF
-  fi
-fi
 [[ "$EUID" -eq 0 ]]   || die "Run this script as root."
 [[ -b "$DEV" ]]       || die "Target is not a block device: $DEV"
 [[ "$KEYMAP" =~ ^[a-z0-9_+-]{2,20}$ ]] || die "--keymap must be an xkb layout name such as fr or us."
@@ -219,15 +161,18 @@ KVER="$(uname -r)"
 ALARM_KEY_FPR=68B3537F39A313B3E574D06777193F152BDBE6A6
 ALARM_KEYSERVERS=(hkps://keyserver.ubuntu.com hkps://keys.openpgp.org)
 
+# Returns 0 when the signature verifies, 1 when it does NOT verify (bad signature),
+# 2 when it cannot be checked at all (no gpg, empty .sig, or the key could not be fetched).
 verify_signature() {
   local file="$1" sig="$2" gh ks status
-  command -v gpg >/dev/null 2>&1 || return 1
-  [[ -s "$sig" ]] || return 1
+  command -v gpg >/dev/null 2>&1 || return 2
+  [[ -s "$sig" ]] || return 2
   gh="$(mktemp -d "$WORK/alarm-gpg.XXXXXX")"
   chmod 700 "$gh"
   for ks in "${ALARM_KEYSERVERS[@]}"; do
     if gpg --homedir "$gh" --batch --keyserver "$ks" --recv-keys "$ALARM_KEY_FPR" >/dev/null 2>&1; then break; fi
   done
+  gpg --homedir "$gh" --batch --list-keys "$ALARM_KEY_FPR" >/dev/null 2>&1 || { rm -rf -- "$gh"; return 2; }
   status="$(gpg --homedir "$gh" --batch --status-fd 1 --verify "$sig" "$file" 2>/dev/null)" || { rm -rf -- "$gh"; return 1; }
   rm -rf -- "$gh"
   grep -q "^\[GNUPG:\] VALIDSIG .*$ALARM_KEY_FPR" <<<"$status"
@@ -240,6 +185,7 @@ if [[ -n "$ALARM_SOURCE" && "$ALARM_SOURCE" != http* ]]; then
   ARCHIVE="$ALARM_SOURCE"
 else
   ALARM_MIRRORS=(
+    https://github.com/codebutnotnerd/boot-arch-linux-on-CM1406-asus-without-using-ssh/releases/download/rootfs-2026.08/ArchLinuxARM-aarch64-latest.tar.gz
     https://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
     https://mirror.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
     http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
@@ -270,13 +216,17 @@ expected_md5="$(awk 'NR == 1 { print $1 }' "$ARCHIVE.md5" | tr '[:upper:]' '[:lo
 actual_md5="$(md5sum "$ARCHIVE" | awk '{ print $1 }')"
 [[ "$actual_md5" == "$expected_md5" ]] || die "Rootfs checksum mismatch; refusing to erase the USB drive."
 
+SIG_OK=0
 if [[ -s "$ARCHIVE.sig" ]]; then
-  if verify_signature "$ARCHIVE" "$ARCHIVE.sig"; then
-    echo "== Rootfs signature verified (key $ALARM_KEY_FPR)."
-  else
-    die "The signature of the rootfs does not verify against the Arch Linux ARM Build System key; refusing to erase the USB drive."
-  fi
-elif [[ "$ARCHIVE_URL" == http://* ]]; then
+  sig_rc=0
+  verify_signature "$ARCHIVE" "$ARCHIVE.sig" || sig_rc=$?
+  case "$sig_rc" in
+    0) SIG_OK=1; echo "== Rootfs signature verified (key $ALARM_KEY_FPR)." ;;
+    1) die "The signature of the rootfs does not verify against the Arch Linux ARM Build System key; refusing to erase the USB drive." ;;
+    *) echo "[!] $ARCHIVE.sig could not be checked (gpg missing or no keyserver reachable); relying on the .md5." >&2 ;;
+  esac
+fi
+if [[ "$SIG_OK" != 1 && "$ARCHIVE_URL" == http://* ]]; then
   if [[ "${ALLOW_INSECURE_HTTP:-0}" == 1 ]]; then
     echo "[!] The rootfs came over plain http and its authenticity could NOT be verified (ALLOW_INSECURE_HTTP=1)." >&2
   else
@@ -284,11 +234,27 @@ elif [[ "$ARCHIVE_URL" == http://* ]]; then
   fi
 fi
 
+if [[ "$SIG_OK" != 1 && -n "$ARCHIVE_URL" && "$ARCHIVE_URL" != *archlinuxarm.org/* && "$ARCHIVE_URL" != https://github.com/codebutnotnerd/* ]]; then
+  if [[ "${ALLOW_UNSIGNED_MIRROR:-0}" == 1 ]]; then
+    echo "[!] The rootfs comes from $ARCHIVE_URL and its signature could NOT be verified (ALLOW_UNSIGNED_MIRROR=1)." >&2
+  else
+    die "The rootfs comes from a mirror that is not archlinuxarm.org and its GPG signature did not verify (the .sig must exist and be signed by key $ALARM_KEY_FPR). A .md5 from the same place proves nothing. Set ALLOW_UNSIGNED_MIRROR=1 to accept the risk."
+  fi
+fi
+
 if [[ -z "$WIFI_SSID" && "${ALLOW_NO_WIFI:-0}" != 1 && -f /var/cache/shill/default.profile ]]; then
   echo "== Reading the saved Wi-Fi network from ChromeOS..."
   prof=/var/cache/shill/default.profile
-  WIFI_SSID="$(sed -n '/^\[wifi_/,/^\[/{s/^Name=//p}' "$prof" | head -1)"
-  psk="$(sed -n '/^\[wifi_/,/^\[/{s/^WiFi.Passphrase=//p}' "$prof" | head -1)"
+  # Name and passphrase are taken from the same [wifi_...] section (the first one that has a Name).
+  shill_field() {
+    awk -v want="$1" '
+      /^\[/ { if (found) exit; sec = ($0 ~ /^\[wifi_/); name = ""; pass = ""; next }
+      sec && /^Name=/ { name = substr($0, 6); found = 1 }
+      sec && /^WiFi\.Passphrase=/ { pass = substr($0, 17) }
+      END { if (found) print (want == "name" ? name : pass) }' "$prof"
+  }
+  WIFI_SSID="$(shill_field name)"
+  psk="$(shill_field pass)"
   case "$psk" in rot47:*) psk="$(printf '%s' "${psk#rot47:}" | tr '!-~' 'P-~!-O')";; esac
   WIFI_PASS="$psk"
 fi
@@ -417,12 +383,12 @@ ALARM_GID="$(awk -F: '$1 == "alarm" { print $4 }' "$MNT/etc/passwd")"
 ALARM_UID="${ALARM_UID:-1000}"; ALARM_GID="${ALARM_GID:-1000}"
 if [[ -d "$MNT/home/alarm" ]]; then
   install -m 755 "$REPO_ROOT/scripts/install-desktop.sh" "$MNT/home/alarm/install-desktop.sh"
-  chown "$ALARM_UID:$ALARM_GID" "$MNT/home/alarm/install-desktop.sh"
-  install -m 755 "$REPO_ROOT/scripts/install-xfce.sh" "$MNT/home/alarm/install-xfce.sh"
-  chown "$ALARM_UID:$ALARM_GID" "$MNT/home/alarm/install-xfce.sh"
+  install -m 755 "$REPO_ROOT/install-hyprland.sh" "$MNT/home/alarm/install-hyprland.sh"
+  install -m 755 "$REPO_ROOT/scripts/upgrade-stick.sh" "$MNT/home/alarm/upgrade-stick.sh"
+  chown "$ALARM_UID:$ALARM_GID" "$MNT/home/alarm/install-desktop.sh" "$MNT/home/alarm/install-hyprland.sh" "$MNT/home/alarm/upgrade-stick.sh"
 fi
 mkdir -p "$MNT/etc/tarkin"
-printf 'XKB_DEFAULT_LAYOUT=%s\n' "$KEYMAP" > "$MNT/etc/tarkin/console.env"
+printf 'XKB_DEFAULT_LAYOUT=%s\nTARKIN_SESSION=terminal\nTARKIN_HYPR_RENDER=auto\n' "$KEYMAP" > "$MNT/etc/tarkin/console.env"
 chmod 644 "$MNT/etc/tarkin/console.env"
 mkdir -p "$MNT/var/lib/systemd/linger"; : > "$MNT/var/lib/systemd/linger/alarm"
 
@@ -487,34 +453,6 @@ else
     || { PKG_OK=0; echo "[!] Package install failed (no network from this shell?)." >&2; }
   sync
   [[ -x "$MNT/usr/bin/wpa_supplicant" && -x "$MNT/usr/bin/cage" && -x "$MNT/usr/bin/foot" && -x "$MNT/usr/bin/seatd" ]] || PKG_OK=0
-
-  # --console dm: install the whole graphical stack here, in the same chroot, so
-  # the stick boots straight into the greeter instead of asking for a second
-  # install from a terminal. install-xfce.sh still exists as the repair path.
-  DM_OK=0
-  XFCE_OK=0
-  if [[ "$CONSOLE" == dm ]]; then
-    echo "== Installing Xorg, SDDM, XFCE and i3 (the big transaction; keep the stick plugged in)..."
-    if in_chroot /bin/bash -c 'pacman -S --needed --noconfirm --noprogressbar --ignore linux-aarch64,linux-aarch64-headers xorg-server xorg-xinit xorg-xauth xf86-input-libinput mesa sddm i3-wm i3status i3lock dmenu xterm'; then
-      DM_OK=1
-      if in_chroot /bin/bash -c 'pacman -S --needed --noconfirm --noprogressbar --ignore linux-aarch64,linux-aarch64-headers xfce4'; then
-        XFCE_OK=1
-        echo "   XFCE installed."
-        if in_chroot /bin/bash -c 'pacman -S --needed --noconfirm --noprogressbar --ignore linux-aarch64,linux-aarch64-headers xfce4-goodies'; then
-          echo "   XFCE goodies installed (panel plugins, screenshooter, taskmanager, ...)."
-        else
-          echo "[!] The xfce4-goodies group failed to install (XFCE itself is fine)." >&2
-        fi
-      else
-        echo "[!] The xfce4 group failed to install: i3 will be the only session." >&2
-      fi
-    else
-      echo "[!] Xorg/SDDM install failed. The stick will boot to tarkin-console;" >&2
-      echo "    install the desktop later with: bash ~/install-xfce.sh" >&2
-    fi
-    sync
-    [[ -x "$MNT/usr/bin/sddm" && -x "$MNT/usr/bin/Xorg" ]] || DM_OK=0
-  fi
   restore_sysctl
 fi
 
@@ -527,6 +465,7 @@ if [[ -x "$MNT/usr/bin/usermod" ]]; then
     in_chroot getent group "$g" >/dev/null 2>&1 \
       || echo "[!] Group $g is still missing in the rootfs: tarkin-console.service lists it and will fail with 216/GROUP. Run scripts/check-usb.sh after booting ChromeOS." >&2
   done
+  [[ -d "$MNT/etc/sudoers.d" ]] || install -d -m 750 "$MNT/etc/sudoers.d"
   echo '%wheel ALL=(ALL:ALL) ALL' > "$MNT/etc/sudoers.d/10-wheel"; chmod 440 "$MNT/etc/sudoers.d/10-wheel"
   if [[ -n "$USER_PASS" ]]; then
     if printf 'alarm:%s\n' "$USER_PASS" | in_chroot chpasswd; then
@@ -560,16 +499,7 @@ sync
 
 WANTS="$MNT/etc/systemd/system/multi-user.target.wants"
 mkdir -p "$WANTS" "$MNT/etc/systemd/system/timers.target.wants"
-# Arch Linux ARM ships openssh and enables sshd.service in the image, with
-# alarm/alarm (and root, if no password was set) as the only credentials.
-# The README promises "no SSH": actually make that true.
 rm -f "$MNT/etc/systemd/system/multi-user.target.wants/sshd.service"
-# Never leave a stray display manager enabled on a graphical install: it would
-# fight seatd/tarkin-console for the single DRM node and give a black screen.
-# In dm mode SDDM is the intended owner.
-if [[ "$CONSOLE" != dm ]]; then
-  rm -f "$MNT/etc/systemd/system/display-manager.service"
-fi
 enable_unit() {
   local unit="$1" dir="$2" link="${3:-$(basename "$1")}"
   if [[ -f "$MNT$unit" ]]; then ln -sfn "$unit" "$dir/$link"; else echo "[!] Unit unavailable in the rootfs: $unit" >&2; fi
@@ -579,37 +509,7 @@ enable_unit /usr/lib/systemd/system/systemd-resolved.service "$WANTS"
 enable_unit /usr/lib/systemd/system/systemd-timesyncd.service "$WANTS"
 enable_unit /usr/lib/systemd/system/seatd.service "$WANTS"
 enable_unit /etc/systemd/system/tarkin-touchpad.service "$WANTS"
-if [[ "$CONSOLE" == dm ]]; then
-  # A display manager owns the console. SDDM was installed above; if that
-  # transaction failed, tarkin-dm-fallback starts tarkin-console instead, so
-  # the first boot is still a working terminal rather than a black screen.
-  rm -f "$WANTS/tarkin-console.service"
-  enable_unit /etc/systemd/system/tarkin-dm-fallback.service "$WANTS"
-  if [[ "${DM_OK:-0}" == 1 ]]; then
-    echo "== Writing the SDDM / XFCE / i3 configuration..."
-    # Same code as the in-system installer: sddm.conf.d, ~/.dmrc, i3 config.
-    HOME="$MNT/home/alarm" XDG_CONFIG_HOME="$MNT/home/alarm/.config" TARKIN_ETC="$MNT/etc" \
-      bash "$REPO_ROOT/scripts/install-xfce.sh" --configs-only \
-      || echo "[!] Could not write the SDDM/XFCE config; run 'bash ~/install-xfce.sh' after boot." >&2
-    chown -R "$ALARM_UID:$ALARM_GID" "$MNT/home/alarm" 2>/dev/null || true
-    if [[ "${XFCE_OK:-0}" != 1 ]]; then
-      sed -i 's/^Session=.*/Session=i3/' "$MNT/home/alarm/.dmrc" 2>/dev/null || true
-      echo "   XFCE is missing: the default session is i3."
-    fi
-    # The service is enabled through its display-manager.service alias, which
-    # graphical.target (the default target) pulls in.
-    ln -sfn /usr/lib/systemd/system/sddm.service "$MNT/etc/systemd/system/display-manager.service"
-  else
-    echo "[!] SDDM is missing: this stick will boot to tarkin-console." >&2
-    echo "    Install the desktop from that terminal with: bash ~/install-xfce.sh" >&2
-  fi
-else
-  enable_unit /etc/systemd/system/tarkin-console.service "$WANTS"
-  rm -f "$WANTS/tarkin-dm-fallback.service"
-fi
-mkdir -p "$MNT/etc/tarkin"
-printf '%s\n' "$CONSOLE" > "$MNT/etc/tarkin/console-mode"
-echo "== Console mode: $CONSOLE"
+enable_unit /etc/systemd/system/tarkin-console.service "$WANTS"
 enable_unit /etc/systemd/system/tarkin-bootlog.timer "$MNT/etc/systemd/system/timers.target.wants"
 if [[ -n "$WIFI_SSID" ]]; then
   enable_unit /usr/lib/systemd/system/wpa_supplicant@.service "$WANTS" wpa_supplicant@wlan0.service
@@ -641,47 +541,19 @@ WARN
 fi
 cat <<EOF
 ==========================================================
-[+] USB written: $DEV   (console mode: $CONSOLE)
+[+] USB written: $DEV
 
 Boot it:
  1. Leave the stick plugged in and power the Chromebook off, then on.
  2. At the 'OS verification is OFF' screen press Ctrl+U.
- 3. Wait 1-2 minutes (the firmware logo may stay up for a while).
-EOF
-if [[ "$CONSOLE" == dm ]]; then
-if [[ "${DM_OK:-0}" == 1 ]]; then
-cat <<'EOF'
-    The SDDM login screen (X11 greeter, software rendering).
-    Sessions: "Xfce Session" (default) and "i3" in the session menu.
-    Log in as `alarm` -- default password `alarm` until you run `passwd`.
-    Administration: sudo. Wi-Fi from the desktop or: sudo tarkin-wifi "Network".
-    If the greeter does not draw, tarkin-dm-fallback starts tarkin-console after
-    about a minute. Greeter log: journalctl -u sddm -b, ~/.local/share/sddm/*.log
-    Undo (from ChromeOS): remove <mnt>/etc/systemd/system/display-manager.service
-    and point multi-user.target.wants/tarkin-console.service at tarkin-console.
-EOF
-else
-cat <<'EOF'
-    A terminal on the built-in screen (tarkin-console): the graphical stack
-    could NOT be installed, so there is no greeter yet.
-    First command to run:  passwd  (the default account is alarm/alarm until you change it).
-    Administration: sudo. Wi-Fi: sudo tarkin-wifi "Network".
-    Install the desktop from that terminal:
-        bash ~/install-xfce.sh
-        sudo reboot
-EOF
-fi
-else
-cat <<'EOF'
-    A terminal should appear on the screen (cage + foot).
+ 3. Wait 1-2 minutes: a terminal should appear on the screen (the firmware logo may stay up for a while).
     First command to run:  passwd  (the default account is alarm/alarm until you change it).
     Administration: sudo. Wi-Fi: sudo tarkin-wifi "Network".
     Optional desktop (Wi-Fi first): bash ~/install-desktop.sh then sudo tarkin-session desktop
+    Optional GPU desktop (after that): bash ~/install-hyprland.sh
+    It adds a "Hyprland (Mali GPU)" session (GDM) and renders on the Mali-G57 instead of the CPU.
     If the screen stays black or frozen on the logo for 3 minutes, this experimental console did not start:
     power off, then see README, "Troubleshooting".
-EOF
-fi
-cat <<EOF
 
 If nothing works: hold the power button, unplug the stick, then press Ctrl+D to boot ChromeOS.
 To see what happened: run  sudo bash scripts/check-usb.sh  in ChromeOS (see README, "Troubleshooting").

@@ -2,19 +2,9 @@
 set -euo pipefail
 case "${1:-}" in desktop|terminal) ;; *) echo "Usage: sudo tarkin-session desktop|terminal" >&2; exit 1 ;; esac
 [[ $EUID -eq 0 ]] || { echo "Run it with sudo." >&2; exit 1; }
-mode="$(cat /etc/tarkin/console-mode 2>/dev/null || echo graphical)"
-if [[ "$mode" == dm ]]; then
-  cat >&2 <<EOF
-This install hands the console to a display manager:
-  $(readlink -f /etc/systemd/system/display-manager.service 2>/dev/null || echo 'display-manager.service')
-
-tarkin-session only switches the tarkin-console session (desktop/terminal), and
-tarkin-console is just the fallback when no display manager runs. Pick the
-session in the greeter instead (Xfce / i3), or go back to the plain console:
-  sudo systemctl disable --now display-manager
-  sudo systemctl enable --now tarkin-console
-  echo graphical | sudo tee /etc/tarkin/console-mode
-EOF
+if systemctl is-active --quiet gdm.service 2>/dev/null; then
+  echo "GDM owns the display (install-hyprland.sh): pick the session with the gear in GDM." >&2
+  echo "To use the on-screen console instead: sudo systemctl disable --now gdm && sudo systemctl enable --now tarkin-console" >&2
   exit 1
 fi
 f=/etc/tarkin/console.env

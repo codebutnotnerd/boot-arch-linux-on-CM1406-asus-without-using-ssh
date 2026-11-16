@@ -1,13 +1,4 @@
 #!/bin/bash
-# Safe full system upgrade on the Tarkin USB stick.
-#
-# Never run a plain `pacman -Syu` here: it can leave hundreds of MB dirty,
-# the stick may need minutes to flush it, and the hung-task watchdog then
-# panics and reboots in the middle of the transaction (half-written rootfs,
-# black screen, no text console to recover from).
-#
-# Usage, on the stick:
-#     sudo bash scripts/upgrade-stick.sh
 set -euo pipefail
 die()  { echo "[-] $*" >&2; exit 1; }
 info() { echo "== $*"; }
@@ -36,8 +27,11 @@ cat <<'WARN'
 [i] Two rules for this stick:
     - the kernel packages of Arch Linux ARM are NOT used here; the real kernel
       is the signed ChromeOS kernel on /dev/sdX1. They are ignored below.
-    - do not enable a display manager (gdm/sddm/lightdm): it fights
-      tarkin-console for the single DRM node and gives a black screen.
+    - one display owner at a time. The installers leave GDM enabled and
+      tarkin-console disabled. Keep that, or switch with:
+        sudo systemctl disable --now gdm
+        sudo systemctl enable --now tarkin-console
+      Enabling both on the same boot gives a black screen.
 WARN
 
 info "Upgrading (this can take 20-60 minutes on USB; slow is fine, a panic is not)..."

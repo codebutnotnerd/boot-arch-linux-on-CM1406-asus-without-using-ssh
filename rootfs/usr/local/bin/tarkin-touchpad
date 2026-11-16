@@ -1,11 +1,4 @@
 #!/bin/bash
-# Diagnose the Tarkin touchpad (ELAN I2C-HID, HID id 04F3:31C6).
-#
-# Read-only. It answers the one question that decides whether the touchpad can
-# feel right: does libinput see a *touchpad* (taps, two-finger scroll, palm
-# rejection) or just a mouse?
-#
-#   tarkin-touchpad
 set -u
 VID_PID="04F3:31C6"
 VID="${VID_PID%%:*}"
@@ -20,7 +13,8 @@ for h in /sys/bus/hid/devices/*; do
     *) continue ;;
   esac
   found=1
-  drv="$(basename "$(readlink -f "$h/driver" 2>/dev/null)")"
+  drv=""
+  [[ -e "$h/driver" ]] && drv="$(basename "$(readlink -f "$h/driver")")"
   echo "   $id -> driver: ${drv:-none}"
   case "$drv" in
     hid-multitouch) echo "      OK: hid-multitouch owns it (libinput should classify it as a touchpad)" ;;
@@ -53,14 +47,18 @@ cat <<'EOF'
 
 == What to do
 * If hid-multitouch owns it: the hardware is fine, tune libinput instead
-  (tap-to-click, scroll speed, accel) in ~/.config/labwc/rc.xml <libinput>.
+  (tap-to-click, scroll speed, accel) in ~/.config/hypr/hyprland.lua (input.touchpad).
 * If hid-generic owns it, try rebinding by hand (not persistent, undo by reboot):
-      id=/sys/bus/hid/devices/0018:04F3:31C6.*        # from above
+      id=/sys/bus/hid/devices/0018:04F3:31C6.*
       echo -n "$(basename $id)" | sudo tee /sys/bus/hid/drivers/hid-generic/unbind
       echo -n "$(basename $id)" | sudo tee /sys/bus/hid/drivers/hid-multitouch/bind
   This is done at every boot by tarkin-touchpad.service. Check it with:
       systemctl status tarkin-touchpad; journalctl -u tarkin-touchpad -b
-* If events are crisp under 'libinput debug-events' but the pointer feels laggy
-  in the session, it is not the touchpad: it is the software renderer
-  (WLR_RENDERER=pixman at 1920x1200). Nothing to fix in the input layer.
+* If libinput sees every movement but the pointer stops while you move your finger:
+  the touch is probably below libinput's pressure threshold. Compare the thresholds in use
+  with the pressure your finger gives:
+      sudo libinput measure touchpad-pressure /dev/input/event3
+  /etc/libinput/local-overrides.quirks sets AttrPressureRange for this touchpad.
+* If events are crisp and the pointer still feels laggy in the session, check the load
+  of the software renderer (llvmpipe/kms_swrast at 1920x1200).
 EOF

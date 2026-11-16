@@ -33,22 +33,9 @@ if (( ${#disks[@]} == 0 )); then
   echo "    Kernel messages:" >&2; dmesg | tail -8 >&2
   exit 1
 fi
-echo "USB sticks:"
+echo "USB drives (sticks and external SSDs):"
 for d in "${disks[@]}"; do printf '   /dev/%-8s %s\n' "${d%% *}" "${d#* }"; done
 default="/dev/${disks[0]%% *}"
-# Show the mode that install-usb.sh will actually use, not a fixed hint.
-cmode="${TARKIN_CONSOLE:-graphical}"
-prev=""
-for a in "$@"; do
-  case "$prev" in --console|-c) cmode="$a" ;; esac
-  case "$a" in --console=*|-c=*) cmode="${a#*=}" ;; esac
-  prev="$a"
-done
-case "$cmode" in
-  graphical) echo "Console   : graphical (tarkin-console: cage+foot on the DRM node)" ;;
-  dm)        echo "Console   : dm (SDDM login screen, XFCE + i3 sessions)" ;;
-  *)         echo "Console   : $cmode (install-usb.sh will reject this: use graphical or dm)" ;;
-esac
 read -r -p "Device to ERASE and install on [$default]: " DEV
 DEV="${DEV:-$default}"
 [[ "$DEV" == /dev/* ]] || DEV="/dev/$DEV"
@@ -56,6 +43,7 @@ ok=0; for d in "${disks[@]}"; do [[ "/dev/${d%% *}" == "$DEV" ]] && ok=1; done
 [[ $ok == 1 ]] || { echo "[-] $DEV is not one of the detected USB sticks. Aborting." >&2; exit 1; }
 
 echo
+lsblk -o NAME,SIZE,MODEL,FSTYPE,LABEL,MOUNTPOINT "$DEV" 2>/dev/null || true
 echo "ALL DATA ON $DEV WILL BE ERASED."
 read -r -p "Type the device name again to confirm ($DEV): " confirm
 [[ "$confirm" == "$DEV" ]] || { echo "[-] Confirmation did not match. Aborting." >&2; exit 1; }

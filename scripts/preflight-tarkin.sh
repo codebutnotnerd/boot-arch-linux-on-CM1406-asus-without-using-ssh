@@ -65,55 +65,6 @@ else
   echo "repack: SKIPPED (partition or keys missing)"
 fi
 
-echo "== virtual terminals (VTs: what sddm and any display manager need)"
-# ChromeOS and the stick boot the SAME signed kernel, so this answer is the one
-# the stick will get. 'vt -1' from sddm means VT_OPENQRY found no free VT.
-sys=0; [[ -d /sys/class/tty/tty0 ]] && sys=1
-dev=0; [[ -c /dev/tty0 ]] && dev=1
-echo "VT driver in the kernel (sysfs): $([[ $sys == 1 ]] && echo OK || echo MISSING)"
-echo "tty0 device visible in this shell: $([[ $dev == 1 ]] && echo OK || echo MISSING)"
-if (( sys && ! dev )); then
-  echo "  note: sysfs says the kernel HAS VTs, so this shell (crosh/container) simply does not expose /dev/tty0."
-  echo "        Run this from VT2 (Ctrl+Alt+Refresh) for the real answer."
-fi
-n=0; for t in /dev/tty[0-9]*; do [[ -c "$t" ]] && n=$((n+1)); done
-echo "VT devices in this shell: $n"
-echo "console/active: $(cat /sys/class/tty/console/active 2>/dev/null || echo unreadable)"
-# Could a VT draw text at all? fbcon + a framebuffer. A display manager does not
-# need either (it draws through DRM), but without them a failed greeter leaves a
-# black panel with no on-screen error.
-fbcon=0; fbdev=0; vtdev=0
-grep -qi 'frame buffer' /sys/class/vtconsole/vtcon*/name 2>/dev/null && fbcon=1
-[[ -e /sys/class/graphics/fb0 ]] && fbdev=1
-[[ -c /dev/tty0 ]] && vtdev=1
-echo "fbcon registered: $([[ $fbcon == 1 ]] && echo OK || echo MISSING)"
-echo "framebuffer: $([[ $fbdev == 1 ]] && echo OK || echo MISSING)"
-echo "VT device: $([[ $vtdev == 1 ]] && echo OK || echo MISSING)"
-if (( fbcon && fbdev && vtdev )); then
-  echo "text console: OK (a failed greeter could be diagnosed on screen)"
-else
-  echo "text console: NOT AVAILABLE (a failed greeter would leave a black panel: --console dm is a one-way door)"
-fi
-if command -v python3 >/dev/null 2>&1; then
-  python3 - <<'PY' 2>&1
-import array, fcntl, os
-try:
-    fd = os.open("/dev/tty0", os.O_RDWR | os.O_NOCTTY)
-except OSError as e:
-    print("VT_OPENQRY: FAILED (cannot open /dev/tty0: %s)" % e.strerror); raise SystemExit
-buf = array.array("i", [0])
-try:
-    fcntl.ioctl(fd, 0x5600, buf, True)      # VT_OPENQRY
-    print("VT_OPENQRY: OK, free VT is %d" % buf[0])
-except OSError as e:
-    print("VT_OPENQRY: FAILED (%s) -> a display manager will say 'vt -1'" % e.strerror)
-finally:
-    os.close(fd)
-PY
-else
-  echo "VT_OPENQRY: SKIPPED (python3 not available here)"
-fi
-
 echo "== network"
 if curl -sIL --max-time 20 https://mirror.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz.md5 2>&1 | grep -q "^HTTP.* 200"; then
   echo "mirror.archlinuxarm.org: OK"

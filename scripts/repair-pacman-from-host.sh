@@ -1,14 +1,4 @@
 #!/bin/bash
-# Finish a pacman transaction that a panic/reboot interrupted, from a PC.
-#
-# The stick is aarch64. On an x86_64 Arch host, qemu-user-static + binfmt lets
-# us chroot into it and run the real pacman, so the package database, the files
-# on disk and the linker cache all agree again.
-#
-# Usage (on the host, with the stick mounted, e.g. /run/media/$USER/ALARM):
-#     sudo bash scripts/repair-pacman-from-host.sh [MOUNTPOINT]
-#
-# It never formats, repartitions or touches the signed kernel partition.
 set -euo pipefail
 M="${1:-}"
 [[ -n "$M" ]] || M="$(findmnt -rno TARGET -S LABEL=ALARM 2>/dev/null | head -1)"
@@ -33,13 +23,25 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "== qemu-user-static + binfmt"
-if ! command -v qemu-aarch64-static >/dev/null && ! command -v qemu-aarch64 >/dev/null; then
-  pacman -S --needed --noconfirm qemu-user-static qemu-user-static-binfmt
+if findmnt -rno OPTIONS -T "$M" 2>/dev/null | tr ',' '\n' | grep -qx noexec; then
+  echo "[-] $M is mounted noexec (ChromeOS mounts removable media that way), so nothing can run inside it."
+  echo "    Mount the stick yourself and pass the mountpoint, e.g.:"
+  echo "      sudo mkdir -p /usr/local/alarm && sudo mount /dev/sda2 /usr/local/alarm"
+  echo "      sudo bash scripts/repair-pacman-from-host.sh /usr/local/alarm"
+  exit 1
 fi
-systemctl restart systemd-binfmt 2>/dev/null || true
-compgen -G '/proc/sys/fs/binfmt_misc/*aarch64*' >/dev/null \
-  || { echo "[-] binfmt handler for aarch64 did not register."; exit 1; }
+
+if [[ "$(uname -m)" == aarch64 ]]; then
+  echo "== Host is aarch64 (ChromeOS on the Chromebook): the rootfs runs natively, no qemu needed"
+else
+  echo "== qemu-user-static + binfmt"
+  if ! command -v qemu-aarch64-static >/dev/null && ! command -v qemu-aarch64 >/dev/null; then
+    pacman -S --needed --noconfirm qemu-user-static qemu-user-static-binfmt
+  fi
+  systemctl restart systemd-binfmt 2>/dev/null || true
+  compgen -G '/proc/sys/fs/binfmt_misc/*aarch64*' >/dev/null \
+    || { echo "[-] binfmt handler for aarch64 did not register."; exit 1; }
+fi
 
 echo "== Throttling writeback on the host (this is what caused the panic)"
 sysctl -w vm.dirty_background_bytes=8388608 >/dev/null
@@ -54,7 +56,15 @@ vm.dirty_bytes = 33554432
 kernel.panic = 10
 EOF
 rm -f "$M/etc/systemd/system/multi-user.target.wants/sshd.service"
-rm -f "$M/etc/systemd/system/display-manager.service"
+if [[ -L "$M/etc/systemd/system/display-manager.service" ]]; then
+  dm_target="$(readlink -f "$M/etc/systemd/system/display-manager.service" || true)"
+  if [[ -n "$dm_target" && -e "$dm_target" ]]; then
+    echo "== Keeping the display manager: $(basename "$dm_target")"
+  else
+    rm -f "$M/etc/systemd/system/display-manager.service"
+    echo "== Removed a dangling display-manager.service symlink"
+  fi
+fi
 
 echo "== Entering the aarch64 rootfs"
 mount --bind /dev "$M/dev"
@@ -73,14 +83,12 @@ rm -f /var/lib/pacman/db.lck
 pacman-key --init >/dev/null 2>&1 || true
 pacman-key --populate archlinuxarm >/dev/null 2>&1 || true
 
-# Hooks that need a live systemd or a kernel build are useless in a chroot, and
-# the desktop-cache hooks take hours under emulation. Rebuild those natively
-# on the device instead.
 mkdir -p /etc/pacman.d/hooks
 masked=()
 for h in /usr/share/libalpm/hooks/*.hook; do
   b="$(basename "$h")"
   case "$b" in
+    30-systemd-sysusers.hook) ;;  # keep: new packages need their users/groups (tarkin-console needs its groups)
     30-systemd-*|90-mkinitcpio-*|60-mkinitcpio-*|71-dracut-*|\
     update-mime-database*|update-desktop-database*|gtk-update-icon-cache*|glib-compile-schemas*)
       ln -sfn /dev/null "/etc/pacman.d/hooks/$b"; masked+=("$b") ;;
