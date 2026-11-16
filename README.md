@@ -24,27 +24,19 @@ Tested on a real CM1406:
 - The on-screen terminal and the built-in keyboard
 - Wi-Fi (MT7925) and `pacman`
 
-Written but not tested on the hardware as a whole: the `labwc` desktop (`waybar`, `fuzzel`) and the XFCE/i3 sessions behind
-SDDM. The **X11 SDDM greeter itself has been seen working** on this machine (in a build where `tarkin-console` was not
-running), so the greeter can draw on this panel; `--console dm` just makes that state deliberate.
-
-Reported working by testers: Bluetooth with audio, and the keyboard backlight LEDs. Not tested at all: suspend,
-touchscreen and brightness keys. The GPU is not used (see the GPU section).
-
-The touchpad (Elan I2C-HID `04F3:31C6`) is detected and usable, but it is not tuned: it runs on stock `libinput`, not
-ChromeOS's gesture library, so taps, scroll speed and palm rejection feel different. See [Touchpad](#touchpad).
+Reported working by testers: Bluetooth with audio, and the keyboard backlight LEDs. The touchpad is detected; it is tuned
+only in the Hyprland desktop (see [Touchpad](#touchpad)). Not tested at all: suspend, touchscreen. The GPU is unused
+by default; `install-hyprland.sh` makes Hyprland render on the Mali-G57 (see the GPU section).
 
 Login is automatic as `alarm`, password `alarm` unless you set another one during the install. Change that password
-at the first boot with `passwd`: the installer removes the `sshd.service` that the Arch Linux ARM image enables by
-default (`alarm`/`alarm` on an open port would otherwise be reachable over Wi-Fi), but anyone holding the machine can
-log in until you change it. Check with `systemctl is-enabled sshd`.
-Suspend is off, the machine reboots 10 seconds after a kernel panic, and the journal is kept on the stick. A *hung
-task* no longer panics: a slow USB flush must not reboot the machine in the middle of a package transaction.
+at the first boot with `passwd`: the installer removes the `sshd.service` that the Arch Linux ARM image enables by default, but anyone holding the
+machine can log in until you change it. Check with `systemctl is-enabled sshd`.
+Suspend is off, the machine reboots 10 seconds after a kernel panic, and the journal is kept on the stick.
 
 ## You need
 
 - A CM1406 in ChromeOS Developer Mode (the "OS verification is OFF" screen at every boot)
-- A USB stick or external USB SSD of 8 GB or more, preferably USB 3.0. Everything on it will be erased.
+- A USB stick or external USB SSD of 8 GB or more, preferably USB 3.0. Everything on it will be erased. A stick that reports itself as an SSD (NAND chip, not flagged removable) is accepted; internal disks are not.
 - A WPA2 Wi-Fi network (a phone hotspot works). The Chromebook needs internet while you install, because the
   terminal and Wi-Fi packages are downloaded then.
 
@@ -60,6 +52,8 @@ is shared by both.
 **1. Download** these with the ChromeOS browser into Downloads: this repository as a zip, and
 <https://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz> plus its `.md5` file next to it. Prefer the
 browser and https: a `.md5` fetched over plain http from the same server does not prove the file is genuine.
+
+The installer tries this release first: <https://github.com/codebutnotnerd/boot-arch-linux-on-CM1406-asus-without-using-ssh/releases/download/rootfs-2026.08/ArchLinuxARM-aarch64-latest.tar.gz> (with the `.md5` and `.sig` next to it), then the official mirrors. This mirror is accepted when the GPG signature cannot be checked (the `.md5` still has to match; a signature that is checked and fails is still refused). Any other host that is not archlinuxarm.org needs a verifiable signature, or `ALLOW_UNSIGNED_MIRROR=1`.
 
 **2. Unpack** in the crosh tab (`Ctrl+Alt+T`, then `shell`):
 
@@ -100,9 +94,8 @@ Options go after `go.sh`, for example `sudo bash install/go.sh --keymap us`:
 | Option | Meaning |
 |---|---|
 | `--keymap <layout>` | Keyboard layout of the terminal (`fr`, `us`, `de`, ...). Default `fr`. |
-| `--console dm` | One-shot SDDM + XFCE + i3: the installer adds the whole graphical stack, the greeter owns the console, and `tarkin-dm-fallback` returns to a terminal if it fails. See [XFCE + i3 + SDDM](#xfce--i3--sddm---console-dm). |
 | `--wifi-ssid <name>` | Use this Wi-Fi instead of the one saved in ChromeOS (it asks for the passphrase). |
-| `--alarm <file or url>` | Rootfs tarball, with its `.md5` next to it (a `.sig` beside it is verified against the Arch Linux ARM key). |
+| `--alarm <file or url>` | Rootfs tarball, with its `.md5` next to it (a `.sig` beside it is verified against the Arch Linux ARM key when `gpg` and a keyserver are available; a signature that does not verify stops the install). |
 | `WIFI_COUNTRY=FR` | Wi-Fi regulatory domain (environment variable). |
 | `ALLOW_NO_WIFI=1` | Ignore the Wi-Fi network saved in ChromeOS (configure it later with `sudo tarkin-wifi "Name"`). |
 | `ALLOW_INSECURE_HTTP=1` | Accept a rootfs that came over plain http without a verifiable GPG signature. Refused by default. |
@@ -113,190 +106,116 @@ Options go after `go.sh`, for example `sudo bash install/go.sh --keymap us`:
 use the arrow keys and Enter on "Boot from external disk" if you get the newer menu. After a minute or two a terminal
 replaces the logo. If you did not set Wi-Fi during the install, run `sudo tarkin-wifi "NetworkName"`.
 
-## Console modes
-
-What draws on the panel at boot is decided at install time (`--console`), and can be changed later.
-
-| Mode | Boots to | VT needed | Notes |
-|---|---|---|---|
-| `graphical` (default) | `tarkin-console`: `cage` + `foot` on the DRM node | no | a display manager cannot share the DRM node: its failure is a black screen |
-| `dm` | the SDDM greeter, with **XFCE** (default) and **i3** sessions | yes | **yes**, and the installer installs all of it |
-
-The mode is stored in `/etc/tarkin/console-mode`.
-
-**There is no `tty` mode.** This kernel cannot show a text console: `fbcon` is not registered and there is no
-`/dev/fb0`, so `getty` on `tty1` would run and draw nothing. That was confirmed on the device — the old `tty` guard
-refused the install. A VT *does* exist (`VT_OPENQRY` succeeds, ChromeOS itself uses VT2), but only a program that
-does its own modesetting can put pixels on this panel: `cage`, Xorg, SDDM. Nothing that relies on the kernel's text
-console can.
-
-**Verify the VT layer** (this is what actually decides whether a display manager works):
-
-```sh
-sudo tarkin-vtcheck
-```
-
-It checks that the VT driver exists (`/sys/class/tty/tty0`), whether this shell can see `/dev/tty0`, how many VTs there
-are, which one is active, and — the important one — calls `VT_OPENQRY`, the exact ioctl SDDM uses.
-
-Run it from **VT2** (`Ctrl+Alt+Refresh`). ChromeOS's crosh `shell` and its Linux container do not expose `/dev/tty0`
-even though the kernel has VTs (your own VT2 proves it). The installer uses the same rule now: it only refuses
-`--console dm` when **both** `/dev/tty0` and `/sys/class/tty/tty0` are missing, and prints a note when it is merely the
-shell that cannot see the device. It never refuses `--console dm` for this: the failure is safe (the fallback returns to
-`tarkin-console`), so a wrong guess about the shell cannot block the install.
-
-`[ok] VT_OPENQRY says VT2 is free` means SDDM has somewhere to go; `FAIL` means it will say `vt -1` no matter what you
-install. On the stick the binary is `tarkin-vtcheck`; from the repository (or from ChromeOS, which runs the same signed
-kernel) it is `sudo bash scripts/verify-vt.sh`.
-
-**A VT can exist and still be invisible.** A display manager gets a VT number from the kernel, but nothing on that VT
-is readable unless `fbcon` and a framebuffer are there. They are not on this kernel, and that is the one real risk of
-`dm` mode: if the greeter starts and cannot draw, the panel is black and there is no on-screen error to read. Check it
-yourself:
-
-```sh
-grep -il 'frame buffer' /sys/class/vtconsole/vtcon*/name; ls -l /sys/class/graphics/fb0
-sudo tarkin-vtcheck      # "VT text console (fbcon)" section and a verdict
-```
-
-`sudo tarkin-vtcheck --activate tty2` is the only test that proves a VT reaches the panel: it switches the screen to
-`tty2` for 3 seconds and back. It is opt-in because on this kernel the screen can stay black and you would have to
-power-cycle.
-
-### XFCE + i3 + SDDM (`--console dm`)
-
-One command, one pass — the graphical stack is installed by the same installer:
-
-```sh
-sudo bash install/go.sh --console dm
-```
-
-It adds Xorg, SDDM, the `xfce4` and `xfce4-goodies` groups and `i3` (plus `dmenu`, `i3status`, `i3lock`, `xterm`) to the
-rootfs in the same chroot transaction as the terminal packages, and then:
-
-- configures SDDM for the **X11** greeter (the Wayland greeter needs EGL, which this machine lacks). This selects the
-  login screen only — it does not force sessions to X11; a Wayland session installed in `/usr/share/wayland-sessions`
-  would still appear in the menu,
-- makes **XFCE the default session** (`/home/alarm/.dmrc`) and leaves **i3 in the session menu** as the fallback,
-- writes a usable `/home/alarm/.config/i3/config`,
-- enables `display-manager.service` (SDDM) and disables `tarkin-console`, and enables `tarkin-dm-fallback.service`
-  as the safety net.
-
-The first boot therefore goes straight to the SDDM greeter. Log in as `alarm` (password `alarm` until you run
-`passwd`); pick *Xfce Session* or *i3*.
-
-If the graphical transaction fails (Wi-Fi dropped mid-install), the installer says so and the stick still boots to
-`tarkin-console`, with the same install available from inside the running system:
-
-```sh
-bash ~/install-xfce.sh
-sudo reboot
-```
-
-That script is also the repair path if you later want to redo the desktop half.
-
-Read this before you do it:
-
-- The greeter has already been seen drawing on this machine, but there is **no text console on this kernel**: if SDDM
-  fails to start, the panel is black and there is nothing to read or type on. `tarkin-dm-fallback` covers the common
-  case (no display manager running after ~50 s → the terminal comes back), not a greeter that runs but draws nothing.
-- Rendering is software (`llvmpipe`). XFCE at 1920x1200 is usable but visibly slow; i3 is lighter, which is why it is
-  the fallback.
-- The screenshots-vs-reality rule: `journalctl -u sddm -b` and `~/.local/share/sddm/*.log` are your only diagnostics if
-  the greeter fails, and reading them means mounting the stick from ChromeOS.
-
-Undo (from ChromeOS, stick mounted):
-
-```sh
-sudo rm -f <mnt>/etc/systemd/system/display-manager.service
-sudo ln -sfn /etc/systemd/system/tarkin-console.service \
-  <mnt>/etc/systemd/system/multi-user.target.wants/tarkin-console.service
-echo graphical | sudo tee <mnt>/etc/tarkin/console-mode
-```
-
 ## Desktop
 
-Needs Wi-Fi. In the on-screen terminal:
+Needs Wi-Fi. Hyprland 0.57 and later read only `~/.config/hypr/hyprland.lua` (the old `hyprland.conf` is ignored), so the script writes both files. In the on-screen terminal:
 
 ```sh
 bash ~/install-desktop.sh
 sudo tarkin-session desktop
 ```
 
-The script installs `labwc`, `waybar`, `fuzzel`, `mako`, `swaybg`, `foot`, Papirus icons, the Inter font,
-`adw-gtk-theme` and `pcmanfm`, and writes a dark Windows-11-like setup into `~/.config` (taskbar centred at the
+Then, for the Mali-G57 GPU (same Wi-Fi requirement, plus the packages `libc++`, `libc++abi`, `libdrm`, `python-pip`):
+
+```sh
+bash ~/install-hyprland.sh
+```
+
+It locates the ChromeOS `libmali` (read-only mount of the ChromeOS partitions, or `--mali-source /path/to/libmali.so`),
+patches it for Arch's glibc (`GLIBC_ABI_DT_RELR`, automated with LIEF), compiles the EGL shim, runs the GPU probes
+(10 DMA-BUF frames) and stops without installing anything if a probe fails (`--skip-gpu-test` to force). It installs
+the stack under `/usr/local/lib/tarkin-gpu`, the launcher `/usr/local/bin/hyprland-mali`, the "Hyprland (Mali GPU)"
+session, and updates the on-screen console. By default (v1.39) GDM is disabled and `tarkin-console` starts
+Hyprland (Mali GPU) by itself at boot, because the GDM greeter goes black on the CM1406 as soon as a key is pressed.
+GNOME stays installed; `--with-gdm` brings the GDM login screen back (gear: GNOME or Hyprland). `--dry-run` previews everything,
+`--remove` takes the GPU session out, `--config-only` only writes `~/.config/hypr/hyprland.lua`: an existing config
+that passes `Hyprland --verify-config` is kept, `--reset-config` rewrites it.
+
+The script installs `hyprland`, `waybar`, `fuzzel`, `mako`, `swaybg`, `foot`, Papirus icons, the Inter font,
+`adw-gtk-theme`, `pcmanfm` and `brightnessctl`, and writes a dark Windows-11-like setup into `~/.config` (taskbar centred at the
 bottom, start menu on `fuzzel`). The screen restarts and shows the desktop, and keeps doing so at every boot.
 
-Keys: `Super+d` start menu, `Super+Enter` terminal, `Super+e` files, `Super+q` close window.
+Keys: `Super+d` start menu, `Super+Enter` terminal, `Super+e` files, `Super+q` close window, `Super+f` fullscreen, `Super+Shift+e` quit Hyprland. The brightness and volume keys work (`brightnessctl`, `wpctl`).
 
-To go back to the plain terminal: `sudo tarkin-session terminal`. If the desktop dies within 15 seconds of
-starting, the screen falls back to the terminal on its own. `bash ~/install-desktop.sh --configs-only` only rewrites
-the config files (the old ones are kept as `*.bak.*`). Rendering is in software, so don't expect it to be smooth.
+To go back to the plain terminal: `sudo tarkin-session terminal`. The console tries, in this order: `hyprland-mali`
+(GPU), default Hyprland, Hyprland with software rendering, then the terminal; a try that dies within 15 s hands over to
+the next one. `TARKIN_HYPR_RENDER=gpu|default|software` in `/etc/tarkin/console.env` pins one mode (anything else, and
+the default, means `auto`). The software settings come from the Mesa and Hyprland documentation and have not been
+confirmed on this machine. `bash ~/install-desktop.sh --configs-only` only rewrites the config files: an existing
+`hyprland.lua` that verifies is kept (old copies are `*.bak.*`), `--reset-config` rewrites it. Rendering is in software
+unless the GPU stack is installed.
 
-In `--console dm` mode `tarkin-session` says so and exits: the greeter owns the display, and the sessions are picked
-there (Xfce / i3). Going back to `graphical` is described in [Console modes](#console-modes).
+## Tools on the stick
 
-Two rules for this stick, because in the default mode the only display is `tarkin-console` and the ChromeOS kernel has
-no text console:
-
-- **Do not run a full `pacman -Syu` from the desktop session.** A sysupgrade rewrites glibc, systemd and wlroots and
-  needs a very large flush; on a slow stick that used to end in `Kernel panic - not syncing: hung_task: blocked tasks`
-  and a reboot in the middle of the transaction, leaving a black screen and no way in. `install-desktop.sh` therefore
-  installs the desktop without a full upgrade; to upgrade deliberately use `sudo bash scripts/upgrade-stick.sh`,
-  which throttles writeback and keeps `kernel.hung_task_panic=0`.
-- **Do not install or enable a display manager in `graphical` mode** (gdm, sddm, lightdm): it takes `/dev/dri/card0`
-  and the seat away from `seatd`/`tarkin-console`, and there is no working EGL (the renderer is `pixman`). The supported
-  desktop here is the `labwc` one above. For a real login screen, reinstall with `--console dm`
-  (see [Console modes](#console-modes)): SDDM and XFCE/i3 are then installed by the installer and the greeter is the
-  only thing on the console.
+| Command | What it does |
+|---|---|
+| `sudo tarkin-diag` | One report file in your home folder: system, console log, Hyprland log and crash report, GPU, touchpad, Wi-Fi, Bluetooth, audio, battery, pacman. Wi-Fi names, passwords and MAC addresses are masked. Send it when something fails. |
+| `tarkin-gpu-check` | GPU nodes, kernel driver, the installed GPU stack (`TARKIN_GPU_ROOT` overrides the path), the `GLIBC_ABI_DT_RELR` check on libmali, and the two GPU probes (`mali-probe`, `shim-probe`) with a timeout, then how to read the result. |
+| `sudo tarkin-dns [--keep]` | When names do not resolve but `ping 1.1.1.1` works: Cloudflare then Quad9 on `wlan0`. `--keep` makes it permanent and ignores the router's DNS. |
+| `sudo tarkin-touchpad` | Touchpad diagnosis (see below). |
+| `sudo bash ~/upgrade-stick.sh` | Safe full upgrade (no kernel packages, writeback throttled). The installer copies `scripts/upgrade-stick.sh` to `/home/alarm`. |
 
 ## Touchpad
 
-The trackpad is an Elan I2C-HID device, `04F3:31C6`. It works, but nothing is tuned for it: ChromeOS uses its own
-gesture library, Arch uses `libinput` with generic defaults. That is the difference between "works" and "works well".
-
-Diagnose it first — this decides whether it is a driver problem or a config problem:
+The trackpad is an Elan I2C-HID device, `04F3:31C6`. `hid-multitouch` is loaded after `hid-generic` has already claimed
+it, so `tarkin-touchpad.service` rebinds it to `hid-multitouch` at every boot (`journalctl -u tarkin-touchpad -b`). If
+the kernel has no `hid-multitouch`, it leaves the touchpad untouched. Diagnose with:
 
 ```sh
 sudo tarkin-touchpad
 ```
 
-- If it says **`hid-multitouch`** owns the device, the hardware and driver are fine: tune `libinput` in
-  `~/.config/labwc/rc.xml` (the `<libinput>` block written by `install-desktop.sh` enables tap-to-click, two-finger
-  drag, palm rejection and a slower pointer).
-- If it says **`hid-generic`**, the kernel is treating the touchpad as a clumsy absolute mouse (no multitouch, no
-  two-finger scroll, jumpy pointer). The module is loaded after the device was already claimed by `hid-generic`,
-  so `modules-load.d` alone does not help: `tarkin-touchpad.service` rebinds it to `hid-multitouch` at every boot
-  (`journalctl -u tarkin-touchpad -b`). If the kernel has no `hid-multitouch`, it leaves the touchpad untouched.
-- If events look crisp in `sudo libinput debug-events` but the pointer still feels laggy, the touchpad is innocent:
-  the whole screen is software-rendered at 1920x1200.
+The Hyprland desktop sets tap-to-click, tap-and-drag, two-finger right click, natural scrolling at 0.6 speed and
+disable-while-typing. The plain terminal
+(`cage` + `foot`) has no libinput settings at all.
 
-The plain terminal (`cage` + `foot`) has no libinput settings at all; the tuning only applies to the `labwc` desktop.
+`/etc/libinput/local-overrides.quirks` sets the pressure thresholds of this touchpad to 15:10. With libinput's
+default for this device (25:30) a light touch, such as the tip of the finger, is ignored and the pointer freezes while
+libinput still reports motion. Check the active values with `grep pressure-based` in the Hyprland log.
 
-## GPU (Mali-G57), experimental
+## Audio
 
-This is what was done by hand on the owner's machine. It is not in the installer and not used by the desktop. Neither
-`labwc` nor Firefox is accelerated.
+The sound card is `mt8189_rt5650`. PipeWire only exposes the `off` and `pro-audio` profiles for it, so the use case
+profile is applied by hand: `rootfs/usr/share/alsa/ucm2/mt8189_rt5650/` holds the ChromeOS profile
+(`mt8189_rt5650.tarkin`) and `tarkin-audio.service` (user unit, enabled by `install-hyprland.sh` and `install-desktop.sh`, which install PipeWire) selects `pro-audio`, enables the speaker route with
+`alsaucm`, sets the hardware speaker volume to 22 and makes `pro-output-0` the default sink.
+
+`/etc/wireplumber/wireplumber.conf.d/51-tarkin-audio.conf` forces 16-bit 48 kHz: the card sounds distorted with the
+24-bit format PipeWire picks by default.
+
+The ChromeOS speaker chain (80 Hz high-pass, equalizer, compressor in `/etc/cras/tarkin.*/dsp.ini`) is not
+reproduced, so do not raise `Speaker Playback Volume` above about 22 without listening carefully. F13 and F14 lower
+and raise the software volume.
+
+Tested by hand on the owner's machine: the speakers play. Headphones, microphones and HDMI were not tested.
+
+## GPU (Mali-G57)
+
+`install-hyprland.sh` makes the desktop render on the GPU instead of the CPU. What is tested, on the machine, by the
+installer itself before it touches anything:
 
 | Item | Status |
 |---|---|
 | Kernel detects the Mali-G57 (KBase driver `r54p1-12eac0`, `/dev/mali0`, `/dev/dri/renderD128`) | Checked |
-| `libmali.so.0.54.1` (same DDK) copied read-only from the ChromeOS root partition | Checked |
-| `DT_RELR` metadata patched with LIEF so Arch's glibc loads it | Checked |
-| EGL 1.5 and OpenGL ES 3.2 | Pass |
+| `libmali.so.0.54.1` (same DDK) located and copied read-only from the ChromeOS partitions (or `--mali-source`) | Checked |
+| `DT_RELR` metadata patched with LIEF so Arch's glibc loads it (automated; verified with `readelf -V`) | Pass |
+| EGL 1.5 and OpenGL ES 3.2 (`GL_RENDERER=Mali-G57`) | Pass |
 | Framebuffer clear and pixel read-back | Pass |
-| DMA-BUF render, 10 frames, 0 bad | Pass |
-| EGL shim, standalone | Pass |
-| `labwc` / wlroots using it | Not tried |
+| DMA-BUF render into a DRM dumb buffer, 10 frames, 0 bad | Pass |
+| EGL shim (EGL_EXT_device_*, platform_device) probe | Pass |
+| Probes re-run from the installed paths; launcher reaches Hyprland (`-- --version`) | Pass |
+| "Hyprland (Mali GPU)" session running live under GDM | GDM greeter goes black on a keypress (`gdm-password: conversation failed`); GDM is off by default since v1.39 |
 | Firefox acceleration and video decoding | Not tried |
 
-The ChromeOS partition is mounted with `mount -o ro,noload` and never written to. The Mali libraries live in
-`~/gpu-test/mali/lib` and are only picked up through `LD_LIBRARY_PATH`; system Mesa, `libEGL` and `libGLESv2` are left
-alone. Extra packages used: `libc++`, `libc++abi`, `gcc`, and `python-pip` with `lief` in a virtualenv. The probe
-programs and the EGL shim come from zoan37's MT8189 project
-(<https://github.com/zoan37/lenovo-slim3-chromebook-omarchy>, `bringup/`), which is built for Hyprland. Nobody has
-shown that it works with `labwc`, so don't preload it into the desktop session. Firefox still reports
-`WebRender (Software)` and `llvmpipe`.
+The whole install can be staged without touching the system:
+`TARKIN_PREFIX=/some/dir bash install-hyprland.sh --gpu-only --mali-source /path/to/libmali.so` — it skips pacman,
+systemctl and the ChromeOS mounts. Without `--skip-gpu-test` a failed probe stops the script before anything is
+installed. The ChromeOS partition is mounted with `mount -o ro,noload` and never written to. The Mali libraries live
+in `/usr/local/lib/tarkin-gpu/mali/lib` and are picked up through `LD_LIBRARY_PATH` only by the `hyprland-mali`
+launcher; system Mesa, `libEGL` and `libGLESv2` are left alone, so GNOME keeps working exactly as before. Extra
+packages used: `libc++`, `libc++abi`, `gcc`, `libdrm`, `python-pip` with `lief` in a virtualenv. The probe programs and
+the EGL shim come from zoan37's MT8189 project
+(<https://github.com/zoan37/lenovo-slim3-chromebook-omarchy>, `bringup/`), which is built for Hyprland.
 
 Two things that came up on the way:
 
@@ -323,13 +242,6 @@ It checks the firmware flags, the partition table, the kernel signature and the 
 | Can't log in on VT2 | The user is `chronos`. |
 | Wrong characters in VT2 | VT2 is QWERTY. |
 | ChromeOS reboots by itself during `go.sh` | Fixed: the package step now runs in an isolated chroot (own mount/pid namespace, read-only `/proc/sys`), risky pacman hooks are masked, and the host's panic/vm settings are restored. The full log is in `/var/tmp/tarkin-install.log`; if it still happens, boot ChromeOS again and send that file plus `ls /sys/fs/pstore`. |
-| Freezes at "Updating MIME cache", then reboots / black screen | This is the known killer: pacman's final `sync()` waited >120 s for the USB stick, the hung-task watchdog panicked, and the machine rebooted mid-transaction. `sudo cat /sys/fs/pstore/console-ramoops-0` shows `task:pacman blocked` / `ksys_sync` / `hung_task: blocked tasks`. The sysctl file now sets `kernel.hung_task_panic=0` and throttles dirty writeback. If it already happened: boot ChromeOS, then from a PC `sudo bash scripts/repair-pacman-from-host.sh` (finishes the transaction under qemu), or re-run the installer. |
-| Black screen after installing a desktop | Two causes: (1) a display manager was enabled and took the DRM node from `seatd`/`tarkin-console`; (2) the transaction above was interrupted and `cage`/`foot` are half-upgraded. Run `scripts/check-usb.sh`; it now reports a missing `kernel.hung_task_panic=0`, an enabled `sshd`/display-manager, and the last boot's console journal. |
-| Touchpad is jumpy, no two-finger scroll, taps do nothing | `sudo tarkin-touchpad` (see [Touchpad](#touchpad)). If `hid-generic` owns it, rebind to `hid-multitouch`; if `hid-multitouch` owns it, it is a libinput tuning issue. |
-| "I want a real desktop, XFCE/GNOME/KDE" | Don't. X11 DEs fight `tarkin-console` and there is no working EGL. Use the provided `labwc` desktop. |
-| `sddm: Could not start display server on vt -1` | SDDM could not get a virtual terminal. In `graphical` mode that is expected: `tarkin-console` owns the display. Run `sudo tarkin-vtcheck`; if `VT_OPENQRY` is OK, reinstall with `--console dm` (see [Console modes](#console-modes)). If `VT_OPENQRY` fails, this kernel has no usable VT and no display manager can work: keep `tarkin-console`. |
-| SDDM greeter never appears, panel black after installing XFCE | Nothing on this kernel can show a console, so there is no in-band diagnosis. Wait ~60 s: `tarkin-dm-fallback` starts `tarkin-console` when no display manager is running. If that does not come back, power-cycle and read `journalctl -u sddm -b` from the stick mounted in ChromeOS (`journalctl --directory=<mnt>/var/log/journal`). Undo with the commands in [XFCE + i3 + SDDM](#xfce--i3--sddm---console-dm). |
-| `--console dm` boots to a black panel | The greeter started but cannot draw, or SDDM never got the VT. Check with `sudo tarkin-vtcheck` / `scripts/verify-vt.sh` (from ChromeOS, same kernel). There is no text console here, so this is a one-way door unless `tarkin-dm-fallback` brings `tarkin-console` back after ~50 s; otherwise use the undo commands in [Console modes](#console-modes). |
 | `go.sh` finds no USB stick | Replug, wait 5 s, try another port (no hub) or another stick. `dmesg \| tail` should show `sd 0:0:0:0: [sda]`. |
 | `curl` hangs on the rootfs | Download it with the browser (step 1) and put it in `/var/tmp`. |
 | `Cannot reach mirror.archlinuxarm.org` | ChromeOS has no internet, or the network filters it. Try a phone hotspot. |
@@ -344,6 +256,9 @@ It checks the firmware flags, the partition table, the kernel signature and the 
 | Text too small or too big | Edit `/etc/xdg/foot/foot.ini` (`font=monospace:size=14`). |
 | `pacman` can't download | Check the network first: `getent hosts mirror.archlinuxarm.org`, `ping 1.1.1.1`. |
 | Black screen, `journalctl -u tarkin-console -b` shows `216/GROUP` or `Failed to determine supplementary groups` | A group of the console service is missing from the stick's `/etc/group`. See [216/GROUP](#black-screen-with-216group-supplementary-groups) below. |
+| Kernel panic `hung_task: blocked tasks` with `task pacman ... blocked for more than 122 seconds` in the crash log | The ChromeOS kernel panics when a task waits more than 2 minutes, and `pacman` does exactly that when it syncs a big install to a slow USB stick. Fixed in new installs (`kernel.hung_task_panic = 0`). On an existing stick, before installing anything big, run `sudo sysctl -w kernel.hung_task_panic=0` and add that line to `/etc/sysctl.d/90-tarkin-panic.conf`. |
+| Hyprland: `CBackend::create() failed` right after the logo | Hyprland found no usable display/GPU backend. Don't start it from inside the terminal (`cage` already owns the display): use `sudo tarkin-session desktop`. This kernel exposes the Mali GPU through the proprietary KBase driver (there is no `panfrost` module), so Hyprland needs either the Mali userspace from the GPU section below or Mesa software rendering. Send `~/.cache/hyprland/hyprlandCrashReport*.txt` and the `hyprland.log` it names. |
+| Black screen or kernel panic after installing another desktop or display manager | Not supported: they fight for the display and need a VT the ChromeOS kernel does not have. Stick to `install-desktop.sh` (Hyprland) plus `install-hyprland.sh` (GPU): they keep GDM and `tarkin-console` from running at the same time. To repair without reflashing, boot ChromeOS, mount the stick's second partition, check the `etc/systemd/system/display-manager.service` link (`scripts/repair-pacman-from-host.sh` only removes it when it dangles) and run `sudo bash scripts/check-usb.sh`. |
 | The desktop doesn't start | It falls back to the terminal. See `journalctl -u tarkin-console -b`, or run `sudo tarkin-session terminal`. |
 
 ### Black screen with 216/GROUP (supplementary groups)
@@ -392,26 +307,21 @@ To undo everything: remove the stick and boot ChromeOS (`Ctrl+D`). To put the fi
 - `scripts/check-usb.sh`: diagnoses a stick and the last failed boot (it also verifies that every group of the
   console service exists in the stick's `/etc/group`)
 - `scripts/set-cmdline.sh`: rewrites the kernel command line of an installed stick
-- `scripts/install-desktop.sh`: the optional desktop (the installer copies it to `/home/alarm`); it no longer runs a
-  full `-Syu`, and it writes the touchpad/libinput config
-- `scripts/install-xfce.sh`: XFCE + i3 + SDDM (also copied to `/home/alarm`), the repair path for the `dm` mode
-- `scripts/upgrade-stick.sh`: the *safe* full upgrade (throttles writeback, keeps `hung_task_panic=0`, ignores the
-  Arch kernel packages)
-- `scripts/repair-pacman-from-host.sh`: finishes a transaction interrupted by a panic, from an x86_64 Arch PC
-  (qemu-user-static + chroot)
-- `scripts/verify-vt.sh`: wrapper for `tarkin-vtcheck` (VT layer check; also works from ChromeOS, same kernel)
+- `scripts/install-desktop.sh`: the optional desktop (the installer copies it to `/home/alarm`)
+- `install-hyprland.sh`: the Mali-G57 GPU stack, the "Hyprland (Mali GPU)" session in GDM and the GPU-aware console
+- `scripts/upgrade-stick.sh`: safe system upgrade on the stick (no kernel packages, writeback throttled; the installer copies it to `/home/alarm`)
+- `scripts/repair-pacman-from-host.sh`: repairs a stick whose pacman transaction was interrupted, from ChromeOS
+- `rootfs/usr/local/bin/tarkin-diag`, `tarkin-gpu-check`, `tarkin-dns`, `tarkin-touchpad`: the tools above
 - `scripts/identify-device.sh`: optional hardware report with HWID, serial and MAC removed
-- `rootfs/`: files copied onto the stick (console service and launcher, `tarkin-wifi`, `tarkin-session`,
-  `tarkin-touchpad`, `tarkin-vtcheck`, `tarkin-input.conf`, the dm fallback unit,
-  seatd without VT, no suspend, panic/hung-task policy, boot report)
-- `notes/tarkin-findings.md`: what has and hasn't been checked on the device, including the confirmed hung-task panic
+- `rootfs/`: files copied onto the stick (console service and launcher, `tarkin-wifi`, `tarkin-session`, seatd without
+  VT, no suspend, panic reboot, boot report)
+- `notes/tarkin-findings.md`: what has and hasn't been checked on the device
 
 ## Safety
 
-- Use a spare stick. Never point the installer at `/dev/mmcblk0`; it refuses non-removable disks and the running disk.
-- The default account is `alarm` / `alarm` with automatic login. The installer disables the `sshd.service` that the
-  Arch Linux ARM image enables by default, but check it (`systemctl is-enabled sshd`) if you move the stick to a
-  network. Set a real password during the install, or run `passwd` right after the first boot.
+- Use a spare stick. Never point the installer at `/dev/mmcblk0`; it refuses anything that is not a USB device, and the running disk.
+- The default account is `alarm` / `alarm` with automatic login and nothing listening for SSH. Set a real password
+  during the install, or run `passwd` right after the first boot.
 - Developer Mode and `dev_boot_signed_only=0` weaken boot verification. Put the flags back when you stop using USB boot.
 - Only do this on a machine you own or may modify. A school-managed Chromebook may forbid Developer Mode.
 - Don't publish HWIDs, serial numbers, MAC addresses, partition UUIDs, Wi-Fi credentials or GitHub tokens.
@@ -420,3 +330,97 @@ To undo everything: remove the stick and boot ChromeOS (`Ctrl+D`). To put the fi
 
 Based on zoan37's Omarchy / Arch Linux ARM Chromebook CM14 project, cut down to the Tarkin USB boot. The seatd
 without VT idea comes from that project's work on another Skywalker variant. MIT license, see [`LICENSE`](LICENSE).
+
+## Changes in v1.39
+
+- `install-hyprland.sh` no longer makes GDM the display manager. On the CM1406 the GDM greeter shows, then turns
+  black on the first keypress; the journal shows `gdm-password: pam_unix conversation failed` (the greeter dies while
+  asking for the password). The script now disables `gdm.service`, enables `tarkin-console.service` (which starts
+  `hyprland-mali`, then Hyprland, software rendering, then the terminal) and sets `multi-user.target`. GNOME stays
+  installed. `--with-gdm` keeps the old behaviour. Without a `tarkin-console` unit it still falls back to GDM.
+- v1.39.1: it also sets `TARKIN_SESSION=desktop` in `/etc/tarkin/console.env`. The USB installer writes `terminal`
+  there, so v1.39 booted straight to the bare terminal instead of Hyprland. On a stick already installed:
+  `sudo tarkin-session desktop`.
+- v1.39.2: it also installs the sound stack (`pipewire`, `wireplumber`, `pipewire-pulse`, `libpulse`, `alsa-utils`,
+  `alsa-ucm-conf`), enables PipeWire in the user session and enables `tarkin-audio.service`. Only `install-desktop.sh`
+  did this before, so a stick set up with `install-hyprland.sh` played no sound (browsers included). On a stick
+  already installed: `sudo pacman -S --needed pipewire wireplumber pipewire-pulse libpulse alsa-utils alsa-ucm-conf`,
+  `systemctl --user enable --now pipewire.socket pipewire-pulse.socket wireplumber.service`,
+  `sudo systemctl --global enable tarkin-audio.service`, `systemctl --user restart tarkin-audio.service`, then restart
+  the browser. If `pulseaudio` is installed the script skips `pipewire-pulse` (pacman would abort on the conflict).
+- v1.39.3: the use case profile is also linked as `conf.d/mt8189_rt5650/HiFi.conf`, which `alsaucm` needs to turn the
+  speaker route on (without it `alsaucm` failed with error -2 and the route was lost after a reboot). `install-hyprland.sh`
+  no longer reports a failure when `tarkin-audio.service` is already enabled. The USB installer refuses a rootfs
+  downloaded from a host other than archlinuxarm.org (and other than the project's own mirror) unless its GPG signature verifies against the Arch Linux ARM key
+  (`ALLOW_UNSIGNED_MIRROR=1` overrides). On a stick already installed:
+  `sudo ln -sf ../../mt8189_rt5650/HiFi.conf /usr/share/alsa/ucm2/conf.d/mt8189_rt5650/HiFi.conf`.
+- Fixing a stick stuck on the black GDM screen without reinstalling: boot ChromeOS, mount the stick's root partition
+  on `/tmp/stick`, then `rm -f /tmp/stick/etc/systemd/system/display-manager.service`,
+  `ln -sf /usr/lib/systemd/system/multi-user.target /tmp/stick/etc/systemd/system/default.target` and
+  `ln -sf /etc/systemd/system/tarkin-console.service /tmp/stick/etc/systemd/system/multi-user.target.wants/`.
+  ChromeOS has no `journalctl`: read the stick's journal after booting Arch (`journalctl -u gdm`).
+
+## Changes in v1.38
+
+- `install-hyprland.sh` run with `sudo` wrote the Hyprland config to `/root` and then failed with "The generated
+  config does not verify". It now refuses to run as root (run it as your user: `bash install-hyprland.sh`, it calls
+  sudo itself), and when the config check fails it prints Hyprland's errors.
+
+## Changes in v1.37
+
+- `install-hyprland.sh` failed with `unable to satisfy dependency 'libsoup' / 'webkit2gtk'`: it installed the whole
+  `gnome` group, and on Arch Linux ARM `gnome-books` and `gnome-boxes` depend on `webkit2gtk`/`libsoup` (removed from
+  the repos), so pacman cancelled the entire install. It now installs only the GNOME desktop (gnome-shell, gdm,
+  gnome-session, control center, nautilus, console, text editor, ...). Each package is first checked to see whether
+  pacman can resolve its dependencies, and a broken one is skipped with a warning instead of failing the whole install. No more
+  63-package selection or qemu prompt either.
+
+## Changes in v1.36
+
+- Black screen at boot (the terminal never appeared, or only after a long wait): the console launcher started
+  `cage` without the settings the earlier working release used. `cage` is wlroots, and without
+  `WLR_RENDERER=pixman` it tries GLES2 through Mesa, and there is no working EGL for this display on the ChromeOS kernel. It now starts the
+  terminal with `WLR_RENDERER=pixman`, `WLR_NO_HARDWARE_CURSORS=1` and `WLR_DRM_DEVICES=<MediaTek card>`, in all three
+  copies of the launcher (`rootfs/usr/local/libexec/tarkin/console`, `install-hyprland.sh`, `scripts/install-desktop.sh`).
+  The Hyprland modes are unchanged: they still unset `WLR_RENDERER`.
+- The launcher exports `DBUS_SESSION_BUS_ADDRESS` again (it is a system service, so apps started from it could not
+  reach the user D-Bus).
+- `/etc/sysctl.d/90-tarkin-panic.conf`: the dirty-page limits are back (`vm.dirty_background_bytes=8 MiB`,
+  `vm.dirty_bytes=32 MiB`, `kernel.hung_task_timeout_secs=120`). Without them a big pacman transaction on a slow stick
+  can stall for minutes.
+
+Repair a v1.35 stick without reflashing (from ChromeOS, stick plugged in, `sdX` = the stick):
+
+```
+sudo mkdir -p /tmp/stick && sudo mount /dev/sdX2 /tmp/stick
+sudo install -m 755 rootfs/usr/local/libexec/tarkin/console /tmp/stick/usr/local/libexec/tarkin/console
+sudo install -m 644 rootfs/etc/sysctl.d/90-tarkin-panic.conf /tmp/stick/etc/sysctl.d/90-tarkin-panic.conf
+sudo umount /tmp/stick
+```
+
+## Changes in v1.35
+
+- `install/install-usb.sh`: with `ALLOW_NO_PKGS=1` (or when the package step failed and `sudo` is not installed) the
+  installer aborted on the missing `/etc/sudoers.d` before writing the kernel; the directory is now created.
+- `install/install-usb.sh`: a `.sig` that cannot be checked (no `gpg`, no keyserver) is no longer reported as a bad
+  signature and no longer aborts an https or local install; a plain-http download without a verified signature is
+  still refused unless `ALLOW_INSECURE_HTTP=1`. A signature that really fails still aborts.
+- `install/install-usb.sh`: the Wi-Fi passphrase read from ChromeOS now comes from the same saved network as the name.
+- `install/install-usb.sh`: `upgrade-stick.sh` is copied to `/home/alarm` (the README listed it as a tool on the stick,
+  but it was never copied).
+- `install-hyprland.sh`: finding libmali on the ChromeOS partitions failed every time (the file was copied after the
+  partition had been unmounted, and a status line ended up inside the returned path). It is now copied while mounted.
+- `install-hyprland.sh`: the default run no longer stops on a missing `gcc`, `readelf` or EGL/DRM headers before the
+  package step that installs them; they are checked right after it. `--config-only` and `--remove` no longer need them.
+- `install-hyprland.sh`: `--gpu-only` no longer enables GDM or disables `tarkin-console` (the help says it does not
+  touch GDM); `TARKIN_PREFIX` staging no longer runs `pacman` without `--gpu-only`.
+- `scripts/install-desktop.sh`: a failed `pacman -Syu` now stops the package step (before, `set -e` was ignored in that
+  subshell and the packages were installed on a half-upgraded system). It also enables `tarkin-audio.service`, which
+  nothing enabled before, so the speakers were never routed.
+- `tarkin-session`: refuses to restart `tarkin-console` while GDM owns the display, and says how to switch.
+- `tarkin-wifi`: writes the new config to a temporary file first (a failure no longer leaves an empty config) and
+  keeps the `country=` line.
+- `tarkin-touchpad`: an unbound touchpad is reported as "no driver bound" instead of driver "driver".
+- `scripts/check-usb.sh`: the fstab/PARTUUID check no longer prints a shell arithmetic error when they don't match.
+- `scripts/repair-pacman-from-host.sh`: works from ChromeOS (aarch64 host: no qemu, no `pacman` on the host), stops with
+  instructions if the stick is mounted `noexec`, and no longer masks the `systemd-sysusers` hook.
