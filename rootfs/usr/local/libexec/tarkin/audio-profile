@@ -1,0 +1,263 @@
+#!/bin/bash
+# tarkin-audio (v1.50): built-in sound of the CM1406 (ALSA card mt8189_rt5650), run by the user unit
+# tarkin-audio.service once PipeWire is up.
+#
+#   audio-profile              set up the card, then follow the headset jack (stays running)
+#   audio-profile route H M    speakers (H=0) or headphones (H=1); internal mic (M=0) or headset mic (M=1)
+#   audio-profile route auto   same, from the current jack state
+#   audio-profile save         remember the volume of the speaker and headphone sinks
+#   audio-profile info         print what the script detects (card, UCM, sinks); changes nothing
+#
+# Why not the UCM profile in PipeWire: WirePlumber switches ports from jacks only through a UCM JackControl
+# value (an ALSA control name). The ChromeOS profile in /usr/share/alsa/ucm2/mt8189_rt5650/HiFi.conf has
+# none: it only names the jack input device (JackDev "mt8189_rt5650 Headset Jack") and its switch codes
+# (JackSwitch 2 = headphone, 4 = microphone), which only ChromeOS reads. So the card stays in the
+# "pro-audio" profile (one PipeWire node per PCM) and this script switches the UCM devices itself with
+# alsaucm, using only the devices of HiFi.conf; audio-jack watches the jack input device.
+# PCMs (HiFi.conf): Speaker = PCM 0, Headphone = PCM 1, Internal Mic = PCM 2, Mic (headset) = PCM 3.
+set -u
+
+CONF=/etc/tarkin/audio.conf
+TARKIN_AUDIO_PROFILE=pro-audio
+TARKIN_SPEAKER_VOLUME=60
+TARKIN_HEADPHONE_VOLUME=40
+TARKIN_JACK_SWITCH=1
+# shellcheck disable=SC1090
+[[ -r "$CONF" ]] && . "$CONF"
+
+ALSA_ID=mt8189rt5650        # card id, as in the cdev "hw:mt8189rt5650" lines of HiFi.conf
+ALSA_NAME=mt8189_rt5650     # card name (directory of the UCM profile)
+PCM_SPEAKER=0; PCM_HEADPHONE=1; PCM_INTMIC=2; PCM_HSMIC=3
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/tarkin"
+VOL_FILE="$STATE_DIR/audio-volumes"
+LOCK="${XDG_RUNTIME_DIR:-/tmp}/tarkin-audio.lock"
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+JACK="$(dirname "$SELF")/audio-jack"
+
+log() { echo "tarkin-audio: $*" >&2; }
+
+# ALSA card index of the built-in card, from its id (or its name in /proc/asound/cards).
+card_index() {
+  local f
+  for f in /proc/asound/card[0-9]*/id; do
+    [[ -r "$f" ]] || continue
+    if [[ "$(cat "$f")" == "$ALSA_ID" ]]; then
+      f="${f%/id}"
+      echo "${f##*card}"
+      return 0
+    fi
+  done
+  awk -v n="$ALSA_NAME" '$1 ~ /^[0-9]+$/ && index($0, n) { print $1; found = 1; exit } END { exit !found }' /proc/asound/cards 2>/dev/null
+}
+
+# PipeWire card whose alsa.card property is the ALSA index (e.g. alsa_card.platform-soc_sound).
+pw_card() {
+  pactl list cards 2>/dev/null | awk -v idx="$1" '
+    /^[[:space:]]*Name: / { name = $2 }
+    $1 == "alsa.card" && $3 == "\"" idx "\"" { print name; exit }'
+}
+
+pw_names() { pactl list "short" "$1" 2>/dev/null | awk '{ print $2 }'; }
+has_node() { # has_node sinks|sources NAME
+  local all
+  all="$(pw_names "$1")"
+  [[ $'\n'"$all"$'\n' == *$'\n'"$2"$'\n'* ]]
+}
+
+# UCM card argument alsaucm accepts for this card: the card name, else hw:<index>.
+ucm_card() {
+  local c
+  for c in "$ALSA_NAME" "hw:$1"; do
+    if alsaucm -c "$c" list _verbs 2>/dev/null | grep -q HiFi; then
+      echo "$c"
+      return 0
+    fi
+  done
+  return 1
+}
+
+detect() {
+  IDX="$(card_index || true)"
+  [[ -n "$IDX" ]] || return 1
+  UCM_CARD="$(ucm_card "$IDX" || true)"
+  PW_CARD="$(pw_card "$IDX")"
+  local suffix="${PW_CARD#alsa_card.}"
+  SINK_SPK="alsa_output.$suffix.pro-output-$PCM_SPEAKER"
+  SINK_HP="alsa_output.$suffix.pro-output-$PCM_HEADPHONE"
+  SRC_INT="alsa_input.$suffix.pro-input-$PCM_INTMIC"
+  SRC_HS="alsa_input.$suffix.pro-input-$PCM_HSMIC"
+  return 0
+}
+
+ucm() {
+  [[ -n "${UCM_CARD:-}" ]] || { log "alsaucm cannot load the HiFi profile of $ALSA_NAME; routes not changed."; return 1; }
+  alsaucm -c "$UCM_CARD" "$@" || { log "alsaucm $* failed."; return 1; }
+}
+
+vol_get() { pactl get-sink-volume "$1" 2>/dev/null | grep -o '[0-9]\+%' | head -n 1; }
+
+save_volumes() {
+  local s v tmp
+  mkdir -p "$STATE_DIR"
+  tmp="$VOL_FILE.tmp"
+  [[ -f "$VOL_FILE" ]] && cp "$VOL_FILE" "$tmp" || : > "$tmp"
+  for s in "$SINK_SPK" "$SINK_HP"; do
+    has_node sinks "$s" || continue
+    v="$(vol_get "$s")"
+    [[ "$v" =~ ^[0-9]+%$ ]] || continue
+    awk -v s="$s" '$1 != s' "$tmp" > "$tmp.2" && mv -f "$tmp.2" "$tmp"
+    echo "$s $v" >> "$tmp"
+  done
+  mv -f "$tmp" "$VOL_FILE"
+}
+
+restore_volume() { # restore_volume SINK DEFAULT_PERCENT
+  local saved n
+  has_node sinks "$1" || return 0
+  saved="$(awk -v s="$1" '$1 == s { v = $2 } END { print v }' "$VOL_FILE" 2>/dev/null)"
+  if [[ "$saved" =~ ^([0-9]+)%$ ]]; then
+    n="${BASH_REMATCH[1]}"
+  else
+    n="$2"
+    log "first start for $1: volume $n%."
+  fi
+  [[ "$n" =~ ^[0-9]+$ ]] || n=50
+  (( n <= 100 )) || n=100
+  pactl set-sink-volume "$1" "$n%" || log "could not set the volume of $1."
+}
+
+route() { # route HP MIC
+  local hp="$1" mic="$2"
+  exec 9>"$LOCK"
+  flock -w 10 9 || log "another route change is running; going on."
+  if [[ "$hp" == 1 ]] && has_node sinks "$SINK_HP"; then
+    log "headphones: speakers off, headphone route on, default sink $SINK_HP."
+    ucm set _verb HiFi set _enadev Speaker set _disdev Speaker set _enadev Headphone
+    pactl set-default-sink "$SINK_HP" || log "could not select $SINK_HP."
+  else
+    [[ "$hp" == 1 ]] && log "headphones plugged in, but PipeWire has no $SINK_HP node: the speakers stay on."
+    log "speakers: headphone route off, speaker route on, default sink $SINK_SPK."
+    ucm set _verb HiFi set _enadev Headphone set _disdev Headphone set _enadev Speaker
+    pactl set-default-sink "$SINK_SPK" || log "could not select $SINK_SPK."
+  fi
+  if [[ "$mic" == 1 ]] && has_node sources "$SRC_HS"; then
+    pactl set-default-source "$SRC_HS" && log "microphone: headset ($SRC_HS)."
+  elif has_node sources "$SRC_INT"; then
+    pactl set-default-source "$SRC_INT" && log "microphone: built-in ($SRC_INT)."
+  fi
+  flock -u 9
+}
+
+jack_state() { # prints "HP MIC" (0 0 when unknown)
+  local out hp=0 mic=0
+  if command -v python3 >/dev/null 2>&1 && out="$(python3 "$JACK" --status 2>/dev/null)"; then
+    [[ "$out" =~ headphone=([01]) ]] && hp="${BASH_REMATCH[1]}"
+    [[ "$out" =~ mic=([01]) ]] && mic="${BASH_REMATCH[1]}"
+  fi
+  echo "$hp $mic"
+}
+
+wait_for() { # wait_for SECONDS COMMAND...
+  local n="$1"; shift
+  local i
+  for ((i = 0; i < n; i++)); do
+    "$@" >/dev/null 2>&1 && return 0
+    sleep 1
+  done
+  return 1
+}
+
+set_hifi_profile() {
+  local p
+  p="$(pactl list cards 2>/dev/null | awk -v card="$PW_CARD" '
+    /^[[:space:]]*Name: / { incard = ($2 == card) }
+    incard && /^[[:space:]]*Profiles:/ { inprof = 1; next }
+    incard && inprof && /^[[:space:]]*Active Profile:/ { exit }
+    incard && inprof && /^\t\t[^\t]/ { sub(/^[[:space:]]+/, ""); n = index($0, ": "); if (n) { name = substr($0, 1, n - 1); if (name ~ /^HiFi/) { print name; exit } } }')"
+  [[ -n "$p" ]] || { log "PipeWire offers no HiFi profile for $PW_CARD (alsaucm failing?); keeping its current profile."; return 1; }
+  pactl set-card-profile "$PW_CARD" "$p" && log "card profile: $p (experimental, no jack switching)."
+}
+
+main_setup() {
+  local hw sp hpv mic
+  for c in pactl alsaucm amixer flock; do
+    command -v "$c" >/dev/null 2>&1 || { log "$c is missing (sound stack not installed: bash ~/install-hyprland.sh); nothing to do."; exit 0; }
+  done
+  [[ "$TARKIN_AUDIO_PROFILE" != off ]] || { log "TARKIN_AUDIO_PROFILE=off in $CONF; nothing to do."; exit 0; }
+  wait_for 30 card_index || { log "ALSA card $ALSA_NAME not found (cat /proc/asound/cards); nothing to do."; exit 0; }
+  wait_for 60 pactl info || { log "PipeWire (pipewire-pulse) does not answer."; exit 1; }
+  detect
+  if [[ -z "$PW_CARD" ]]; then
+    wait_for 30 bash -c "pactl list cards 2>/dev/null | grep -q 'alsa.card = \"$IDX\"'" || true
+    detect
+  fi
+  [[ -n "$PW_CARD" ]] || { log "PipeWire has no card for ALSA card $IDX."; exit 1; }
+  log "ALSA card $IDX, PipeWire card $PW_CARD, UCM card '${UCM_CARD:-none}', profile $TARKIN_AUDIO_PROFILE."
+
+  if [[ "$TARKIN_AUDIO_PROFILE" == hifi ]]; then
+    set_hifi_profile || true
+    exec sleep infinity
+  fi
+
+  wait_for 30 pactl set-card-profile "$PW_CARD" pro-audio || log "could not select the pro-audio profile of $PW_CARD."
+  # Capture paths of both microphones (they use separate PCMs, so both can stay on).
+  ucm set _verb HiFi set _enadev "Internal Mic" set _enadev Mic || true
+  # Hardware speaker gain, as in v1.39.3 (README: do not go above about 22 without the ChromeOS DSP).
+  # This control is not part of HiFi.conf, so it is only set when the card really has it.
+  hw="name='Speaker Playback Volume'"
+  if amixer -q -c "$IDX" cget "$hw" >/dev/null 2>&1; then
+    amixer -q -c "$IDX" cset "$hw" 22,22 || log "could not set Speaker Playback Volume."
+  else
+    log "the card has no 'Speaker Playback Volume' control; hardware gain left as is."
+  fi
+  wait_for 15 has_node sinks "$SINK_SPK" || log "$SINK_SPK did not appear."
+  sp="$TARKIN_SPEAKER_VOLUME"; hpv="$TARKIN_HEADPHONE_VOLUME"
+  restore_volume "$SINK_SPK" "$sp"
+  restore_volume "$SINK_HP" "$hpv"
+  save_volumes
+  pactl set-sink-mute "$SINK_SPK" 0 2>/dev/null || true
+
+  if [[ "$TARKIN_JACK_SWITCH" == 1 ]] && command -v python3 >/dev/null 2>&1 && python3 "$JACK" --status >/dev/null 2>&1; then
+    log "following the headset jack."
+    exec python3 "$JACK" --watch "$SELF" route
+  fi
+  read -r hp mic < <(jack_state)
+  [[ "$TARKIN_JACK_SWITCH" == 1 ]] && log "jack switching unavailable (python3 missing or no '$ALSA_NAME Headset Jack' input device)."
+  route "$hp" "$mic"
+  # Stay running so that "save" (ExecStop) keeps the volumes at shutdown.
+  exec sleep infinity
+}
+
+case "${1:-}" in
+  "") main_setup ;;
+  route)
+    detect || { log "ALSA card $ALSA_NAME not found."; exit 1; }
+    if [[ "${2:-}" == auto ]]; then
+      read -r hp mic < <(jack_state)
+    else
+      hp="${2:-0}"; mic="${3:-0}"
+    fi
+    [[ "$hp" =~ ^[01]$ && "$mic" =~ ^[01]$ ]] || { echo "Usage: $0 route 0|1 0|1  or  $0 route auto" >&2; exit 2; }
+    route "$hp" "$mic"
+    ;;
+  save)
+    command -v pactl >/dev/null 2>&1 || exit 0
+    detect || exit 0
+    save_volumes
+    ;;
+  info)
+    if detect; then
+      echo "alsa_index=$IDX ucm_card=${UCM_CARD:-none} pw_card=${PW_CARD:-none}"
+      echo "speaker_sink=$SINK_SPK $(has_node sinks "$SINK_SPK" && echo present || echo ABSENT) volume=$(vol_get "$SINK_SPK")"
+      echo "headphone_sink=$SINK_HP $(has_node sinks "$SINK_HP" && echo present || echo ABSENT) volume=$(vol_get "$SINK_HP")"
+      echo "internal_mic=$SRC_INT $(has_node sources "$SRC_INT" && echo present || echo ABSENT)"
+      echo "headset_mic=$SRC_HS $(has_node sources "$SRC_HS" && echo present || echo ABSENT)"
+      echo "jack(headphone mic)=$(jack_state)"
+      echo "profile_setting=$TARKIN_AUDIO_PROFILE jack_switch=$TARKIN_JACK_SWITCH"
+    else
+      echo "ALSA card $ALSA_NAME not found"
+      exit 1
+    fi
+    ;;
+  *) echo "Usage: $0 [route 0|1 0|1 | route auto | save | info]" >&2; exit 2 ;;
+esac

@@ -1,0 +1,21 @@
+[Unit]
+Description=Tarkin on-screen terminal (cage + foot)
+After=systemd-user-sessions.service seatd.service
+Wants=seatd.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=alarm
+Group=alarm
+SupplementaryGroups=video input render audio seat
+ExecStart=/usr/local/libexec/tarkin/console
+Restart=always
+RestartSec=3
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

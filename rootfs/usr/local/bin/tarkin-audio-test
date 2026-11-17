@@ -1,0 +1,211 @@
+#!/bin/bash
+# tarkin-audio-test (v1.50): checks the built-in sound step by step and ends with a short summary that fits
+# on one screen (take one photo of it). Run it as alarm, in a terminal, without sudo:
+#   tarkin-audio-test            state + speaker, headphone and microphone tests (asks questions)
+#   tarkin-audio-test --status   state only (no sound, no question); used by sudo tarkin-diag
+# The full output is also saved to ~/tarkin-audio-test-<date>.txt
+set -u
+VERSION="$(cat /etc/tarkin/version 2>/dev/null || echo unknown)"
+AP=/usr/local/libexec/tarkin/audio-profile
+JACK=/usr/local/libexec/tarkin/audio-jack
+UCM=/usr/share/alsa/ucm2/mt8189_rt5650/HiFi.conf
+WAV=/usr/share/sounds/alsa/Front_Center.wav
+QUICK=0
+case "${1:-}" in
+  --status) QUICK=1 ;;
+  "") ;;
+  *) echo "Usage: tarkin-audio-test [--status]" >&2; exit 2 ;;
+esac
+if [[ $EUID -eq 0 ]]; then
+  echo "Run it as alarm, without sudo: tarkin-audio-test (PipeWire runs in the user session)." >&2
+  exit 1
+fi
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+OUT=""
+if (( ! QUICK )); then
+  OUT="$HOME/tarkin-audio-test-$(date +%Y%m%d-%H%M%S).txt"
+  exec > >(tee -a "$OUT") 2>&1
+fi
+
+section() { printf '\n==== %s ====\n' "$1"; }
+sh_() { printf '$ %s\n' "$*"; "$@" 2>&1 | head -n 60; }
+yes_no() { # yes_no QUESTION -> prints yes|no|skipped
+  local a
+  read -r -p "$1 [y/n] " a </dev/tty || a=""
+  case "$a" in y|Y|o|O|yes|oui) echo yes ;; n|N|no|non) echo no ;; *) echo "no answer" ;; esac
+}
+
+# --- Detection (audio-profile info) ---
+info="$("$AP" info 2>/dev/null)" || info=""
+field() { sed -n "s/^$1=\\([^ ]*\\).*/\\1/p" <<<"$info"; }
+IDX="$(field alsa_index)"; UCM_CARD="$(sed -n 's/.*ucm_card=\([^ ]*\).*/\1/p' <<<"$info")"
+PW_CARD="$(sed -n 's/.*pw_card=\([^ ]*\).*/\1/p' <<<"$info")"
+SINK_SPK="$(field speaker_sink)"; SINK_HP="$(field headphone_sink)"
+SRC_INT="$(field internal_mic)"; SRC_HS="$(field headset_mic)"
+present() { grep -q "^$1=[^ ]* present" <<<"$info" && echo present || echo ABSENT; }
+volume() { sed -n "s/^$1=.* volume=\\([0-9]*%\\).*/\\1/p" <<<"$info"; }
+JACK_OUT="$(python3 "$JACK" --status 2>/dev/null || true)"
+
+echo "tarkin-audio-test v$VERSION $(date -u +%FT%TZ)"
+section "card"
+sh_ cat /proc/asound/cards
+echo "${info:-audio-profile info: the card was not found}"
+echo "jack: ${JACK_OUT:-unknown (python3 missing?)}"
+section "services (user)"
+sh_ systemctl --user is-active pipewire.service wireplumber.service pipewire-pulse.service tarkin-audio.service
+sh_ journalctl --user -u tarkin-audio.service -b --no-pager -n 15
+section "PipeWire"
+sh_ pactl get-default-sink
+sh_ pactl get-default-source
+sh_ pactl list short sinks
+sh_ pactl list short sources
+if command -v wpctl >/dev/null 2>&1; then
+  printf '$ wpctl status (audio part)\n'
+  wpctl status 2>&1 | sed -n '/^Audio/,/^Video/p' | head -n 40
+fi
+section "use case profile"
+sh_ ls -l /usr/share/alsa/ucm2/conf.d/mt8189_rt5650/ /usr/share/alsa/ucm2/mt8189_rt5650/
+if [[ -n "$UCM_CARD" && "$UCM_CARD" != none ]]; then
+  sh_ alsaucm -c "$UCM_CARD" list _verbs
+  sh_ alsaucm -c "$UCM_CARD" list _devices/HiFi
+else
+  echo "alsaucm cannot load the profile with -c mt8189_rt5650 nor with -c hw:<index>:"
+  alsaucm -c mt8189_rt5650 list _verbs 2>&1 | head -n 5
+fi
+
+section "mixer: every control named in HiFi.conf"
+missing=0; total=0; missing_names=""
+if [[ -n "$IDX" && -r "$UCM" ]]; then
+  while IFS= read -r ctl; do
+    total=$((total + 1))
+    if v="$(amixer -c "$IDX" cget "name='$ctl'" 2>/dev/null | sed -n 's/^ *: values=//p')" && [[ -n "$v" ]]; then
+      printf '  %-34s = %s\n' "$ctl" "$v"
+    else
+      printf '  %-34s = MISSING\n' "$ctl"
+      missing=$((missing + 1)); missing_names+="$ctl; "
+    fi
+  done < <(grep -o "name='[^']*'" "$UCM" | sed "s/^name='//; s/'\$//" | sort -u)
+  v="$(amixer -c "$IDX" cget "name='Speaker Playback Volume'" 2>/dev/null | sed -n 's/^ *: values=//p')"
+  printf '  %-34s = %s   (not in HiFi.conf; set to 22 by tarkin-audio when present)\n' "Speaker Playback Volume" "${v:-MISSING}"
+else
+  echo "  card or $UCM not found"
+fi
+
+R_SPK="not tested"; R_HP="not tested"; R_HP_SPK="not tested"; R_MIC_INT="not tested"; R_MIC_HS="not tested"
+
+play() { # play SINK
+  if command -v pw-play >/dev/null 2>&1; then
+    timeout 20 pw-play --target "$1" "$WAV"
+  else
+    timeout 20 paplay --device="$1" "$WAV"
+  fi
+}
+peak() { # peak WAVFILE -> "N%"
+  python3 - "$1" <<'PY' 2>/dev/null || echo "?"
+import array, sys, wave
+data, width = b"", 2
+try:
+    w = wave.open(sys.argv[1])
+    width = w.getsampwidth()
+    data = w.readframes(w.getnframes())
+except Exception:
+    pass
+if not data:  # header not finalised: read the raw samples after the 44-byte header
+    data = open(sys.argv[1], "rb").read()[44:]
+if width != 2:
+    print("?")
+    sys.exit(0)
+a = array.array("h")
+a.frombytes(data[: len(data) // 2 * 2])
+p = max((abs(x) for x in a), default=0)
+print("%d%%" % round(p * 100 / 32768))
+PY
+}
+mic_test() { # mic_test SOURCE LABEL -> sets MIC_RESULT
+  local f="$TMP/mic.wav" pk heard
+  rm -f "$f"
+  echo "Speak (or clap) for 4 seconds after Enter: recording from $1"
+  read -r _ </dev/tty || true
+  if command -v pw-record >/dev/null 2>&1; then
+    timeout -s INT 5 pw-record --target "$1" --rate 48000 --channels 2 --format s16 "$f" || true
+  else
+    timeout -s INT 5 parecord --device="$1" --rate=48000 --channels=2 --format=s16le --file-format=wav "$f" || true
+  fi
+  if [[ ! -s "$f" ]]; then
+    MIC_RESULT="no recording"
+    return
+  fi
+  pk="$(peak "$f")"
+  echo "Recorded; loudest sample: $pk of full scale. Playing it back on the current output..."
+  if command -v pw-play >/dev/null 2>&1; then timeout 10 pw-play "$f" || true; else timeout 10 paplay "$f" || true; fi
+  heard="$(yes_no "Did you hear your voice played back?")"
+  MIC_RESULT="peak $pk, heard: $heard"
+}
+
+if (( ! QUICK )); then
+  [[ -r "$WAV" ]] || { echo "$WAV is missing (package alsa-utils)."; }
+  section "test 1: speakers"
+  if [[ "$(present speaker_sink)" == present && -r "$WAV" ]]; then
+    "$AP" route 0 0 2>&1 | sed 's/^/  /'
+    echo "Playing 'Front Center' on the speakers ($(volume speaker_sink) volume)..."
+    play "$SINK_SPK" || echo "  (the player returned an error)"
+    R_SPK="$(yes_no "Did the speakers play 'Front Center'?")"
+  else
+    R_SPK="speaker sink absent"
+  fi
+
+  section "test 2: headphones"
+  read -r -p "Plug in headphones (or a headset) now, then press Enter (type s then Enter to skip): " a </dev/tty || a=s
+  if [[ "$a" != s* ]]; then
+    sleep 1
+    JACK_NOW="$(python3 "$JACK" --status 2>/dev/null || true)"
+    echo "jack now: ${JACK_NOW:-unknown}"
+    if [[ "$(present headphone_sink)" == present && -r "$WAV" ]]; then
+      "$AP" route 1 0 2>&1 | sed 's/^/  /'
+      echo "Playing 'Front Center' on the headphones..."
+      play "$SINK_HP" || echo "  (the player returned an error)"
+      R_HP="$(yes_no "Did the HEADPHONES play it?") (jack: ${JACK_NOW:-unknown})"
+      R_HP_SPK="$(yes_no "Did the speakers stay SILENT?")"
+    else
+      R_HP="headphone sink absent (jack: ${JACK_NOW:-unknown})"
+    fi
+  else
+    R_HP="skipped"
+  fi
+
+  section "test 3: microphones"
+  if [[ "$(present internal_mic)" == present ]]; then
+    "$AP" route auto 2>&1 | sed 's/^/  /'
+    MIC_RESULT=""; mic_test "$SRC_INT" internal; R_MIC_INT="$MIC_RESULT"
+  else
+    R_MIC_INT="internal mic source absent"
+  fi
+  if [[ "$(python3 "$JACK" --status 2>/dev/null)" == *mic=1* ]]; then
+    if [[ "$(present headset_mic)" == present ]]; then
+      MIC_RESULT=""; mic_test "$SRC_HS" headset; R_MIC_HS="$MIC_RESULT"
+    else
+      R_MIC_HS="headset mic source absent"
+    fi
+  else
+    R_MIC_HS="no headset microphone detected by the jack"
+  fi
+  "$AP" route auto >/dev/null 2>&1 || true
+fi
+
+section "SUMMARY tarkin-audio-test v$VERSION"
+echo "card      : ALSA ${IDX:-NOT FOUND} | UCM ${UCM_CARD:-none} | PipeWire ${PW_CARD:-none}"
+echo "speaker   : $(present speaker_sink) $(volume speaker_sink) | headphone sink: $(present headphone_sink) $(volume headphone_sink)"
+echo "mics      : internal $(present internal_mic) | headset $(present headset_mic)"
+echo "default   : $(pactl get-default-sink 2>/dev/null | sed 's/.*\.//') / $(pactl get-default-source 2>/dev/null | sed 's/.*\.//')"
+echo "jack      : ${JACK_OUT:-unknown}"
+echo "services  : $(systemctl --user is-active pipewire.service wireplumber.service pipewire-pulse.service tarkin-audio.service 2>/dev/null | tr '\n' ' ')(pipewire wireplumber pulse tarkin-audio)"
+echo "UCM ctls  : $missing missing of $total${missing_names:+ -> $missing_names}"
+if (( ! QUICK )); then
+  echo "speakers  : $R_SPK"
+  echo "headphones: $R_HP | speakers silent: $R_HP_SPK"
+  echo "mic int.  : $R_MIC_INT"
+  echo "mic headset: $R_MIC_HS"
+  echo "full report: $OUT"
+fi

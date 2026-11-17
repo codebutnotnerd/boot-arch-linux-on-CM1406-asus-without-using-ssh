@@ -1,0 +1,24 @@
+# Sourced by ~/.bashrc of alarm (v1.50): shows the first-boot status and boot warnings in each new
+# terminal. Plain sh syntax, no exit, no set -e: it must never break the shell that sources it.
+if [ -f /var/lib/tarkin/firstboot.pending ]; then
+  echo "------------------------------------------------------------------------"
+  echo " First-boot setup in progress: Hyprland, Mali GPU and sound are being"
+  echo " installed (20-60 minutes, needs Wi-Fi). Do not power off. The machine"
+  echo " restarts by itself into Hyprland when it is done."
+  echo "   Progress : tail -f /var/log/tarkin-firstboot.log   (Ctrl+C to stop watching)"
+  echo "   No Wi-Fi?: sudo tarkin-wifi \"NetworkName\""
+  if [ -f /var/lib/tarkin/firstboot.failed ]; then
+    echo "   The previous attempt failed ($(cat /var/lib/tarkin/firstboot.failed 2>/dev/null)); see the log."
+  fi
+  echo "------------------------------------------------------------------------"
+elif [ -f /var/lib/tarkin/firstboot.failed ]; then
+  echo "------------------------------------------------------------------------"
+  echo " The first-boot setup (Hyprland, GPU, sound) FAILED and stopped retrying."
+  echo "   Why      : tail -n 40 /var/log/tarkin-firstboot.log"
+  echo "   Retry    : bash ~/install-hyprland.sh      (as alarm, NOT with sudo)"
+  echo "------------------------------------------------------------------------"
+fi
+if [ -s /run/tarkin/boot-warnings ]; then
+  echo "[!] Boot check warnings (sudo journalctl -u tarkin-bootcheck -b):"
+  sed 's/^/    /' /run/tarkin/boot-warnings
+fi

@@ -1,0 +1,126 @@
+#!/bin/bash
+set -u
+cd "$HOME" || exit 1
+uid="$(id -u)"
+export XDG_RUNTIME_DIR="/run/user/$uid"
+n=0
+while [[ ! -d "$XDG_RUNTIME_DIR" && $n -lt 60 ]]; do
+  sleep 1; n=$((n+1))
+done
+if [[ ! -d "$XDG_RUNTIME_DIR" ]]; then
+  echo "tarkin-console: $XDG_RUNTIME_DIR missing after ${n}s (user manager not running? check linger)" >&2
+  exit 1
+fi
+# This is a *system* service, not a logind session: export the user D-Bus so
+# GTK/portal apps started from the terminal or the desktop can reach it.
+export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+export LIBSEAT_BACKEND=seatd SEATD_VTBOUND=0
+export LANG=C.UTF-8
+n=0
+until ls /dev/dri/card[0-9] >/dev/null 2>&1 || (( n >= 20 )); do sleep 1; n=$((n+1)); done
+card=/dev/dri/card0
+for c in /sys/class/drm/card[0-9]; do
+  [[ -e "$c" && -e "/dev/dri/$(basename "$c")" ]] || continue
+  if [[ "$(readlink -f "$c/device/driver" 2>/dev/null)" == *mediatek* ]]; then card="/dev/dri/$(basename "$c")"; break; fi
+done
+unset WAYLAND_DISPLAY DISPLAY
+[[ -f /etc/tarkin/console.env ]] && . /etc/tarkin/console.env
+export XKB_DEFAULT_LAYOUT="${XKB_DEFAULT_LAYOUT:-us}"
+export AQ_DRM_DEVICES="$card" XDG_SESSION_TYPE=wayland
+session="${TARKIN_SESSION:-terminal}"
+echo "tarkin-console: display $card, keyboard layout $XKB_DEFAULT_LAYOUT, session $session"
+
+# The on-screen terminal (cage + foot) is wlroots. There is no working EGL for
+# this display, so letting wlroots probe GLES2 stalls or fails (long black
+# screen, restart loop). Pin it like the earlier working release did: pixman
+# renderer, software cursor, MediaTek display node. Hyprland unsets WLR_RENDERER.
+run_terminal() {
+  unset LD_PRELOAD LD_LIBRARY_PATH LIBGL_ALWAYS_SOFTWARE GALLIUM_DRIVER MESA_LOADER_DRIVER_OVERRIDE WLR_RENDERER_ALLOW_SOFTWARE AQ_NO_MODIFIERS
+  export WLR_RENDERER=pixman WLR_NO_HARDWARE_CURSORS=1 WLR_DRM_DEVICES="$card"
+  exec cage -- foot
+}
+
+if [[ "$session" != desktop ]]; then
+  run_terminal
+fi
+
+gpu_cmd=()
+default_cmd=()
+[[ -x /usr/local/bin/hyprland-mali ]] && gpu_cmd=(/usr/local/bin/hyprland-mali)
+if command -v start-hyprland >/dev/null 2>&1; then
+  default_cmd=(start-hyprland)
+elif command -v Hyprland >/dev/null 2>&1; then
+  default_cmd=(Hyprland)
+fi
+if (( ${#gpu_cmd[@]} == 0 && ${#default_cmd[@]} == 0 )); then
+  echo "tarkin-console: session desktop requested but Hyprland is not installed (run ~/install-desktop.sh); showing the terminal." >&2
+  run_terminal
+fi
+
+render="${TARKIN_HYPR_RENDER:-auto}"
+case "$render" in
+  gpu|default|software) ;;
+  *) render=auto ;;
+esac
+modes=()
+case "$render" in
+  gpu)
+    if (( ${#gpu_cmd[@]} )); then
+      modes=(gpu)
+    else
+      echo "tarkin-console: TARKIN_HYPR_RENDER=gpu but /usr/local/bin/hyprland-mali is missing; trying the default renderer then software." >&2
+      if (( ${#default_cmd[@]} )); then modes=(default software); else modes=(software); fi
+    fi
+    ;;
+  default)
+    if (( ${#default_cmd[@]} )); then
+      modes=(default)
+    else
+      echo "tarkin-console: TARKIN_HYPR_RENDER=default but Hyprland is missing; trying software." >&2
+      modes=(software)
+    fi
+    ;;
+  software)
+    modes=(software)
+    ;;
+  *)
+    if (( ${#gpu_cmd[@]} )); then modes+=(gpu); fi
+    if (( ${#default_cmd[@]} )); then modes+=(default); fi
+    modes+=(software)
+    ;;
+esac
+
+set_hypr_env() {
+  unset LD_PRELOAD LD_LIBRARY_PATH LIBGL_ALWAYS_SOFTWARE GALLIUM_DRIVER MESA_LOADER_DRIVER_OVERRIDE WLR_RENDERER WLR_RENDERER_ALLOW_SOFTWARE AQ_NO_MODIFIERS
+  export XDG_CURRENT_DESKTOP=Hyprland XDG_SESSION_DESKTOP=Hyprland XDG_SESSION_TYPE=wayland AQ_DRM_DEVICES="$card"
+}
+
+for mode in "${modes[@]}"; do
+  set_hypr_env
+  cmd=()
+  case "$mode" in
+    gpu)
+      cmd=("${gpu_cmd[@]}")
+      echo "tarkin-console: starting Hyprland on the Mali GPU (hyprland-mali)." >&2
+      ;;
+    default)
+      cmd=("${default_cmd[@]}")
+      echo "tarkin-console: starting ${cmd[0]} with the default renderer." >&2
+      ;;
+    software)
+      cmd=("${default_cmd[@]}")
+      if (( ${#cmd[@]} == 0 )); then cmd=(Hyprland); fi
+      echo "tarkin-console: starting ${cmd[0]} with software rendering." >&2
+      export LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe MESA_LOADER_DRIVER_OVERRIDE=kms_swrast AQ_NO_MODIFIERS=1 WLR_RENDERER_ALLOW_SOFTWARE=1
+      ;;
+  esac
+  start=$SECONDS
+  "${cmd[@]}"
+  rc=$?
+  if (( SECONDS - start >= 15 )); then
+    exit "$rc"
+  fi
+  echo "tarkin-console: Hyprland ($mode) exited after $((SECONDS - start))s (code $rc)." >&2
+done
+echo "tarkin-console: the desktop does not start; falling back to the terminal. See: sudo tarkin-diag" >&2
+run_terminal
