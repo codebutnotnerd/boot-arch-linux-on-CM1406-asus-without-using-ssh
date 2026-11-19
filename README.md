@@ -50,14 +50,14 @@ The touchscreen and Netflix have not been tried either. The tests in `tests/` ru
 
    ```sh
    cd /var/tmp
-   bsdtar -xf ~/MyFiles/Downloads/<zip-name>.zip
+   bsdtar -xf ~/MyFiles/Downloads/boot-arch-linux-on-CM1406-asus-without-using-ssh-main.zip
    ls
    ```
 
 3. Plug in the stick. Switch to VT2 with `Ctrl+Alt+Refresh`, log in as `chronos`, and run:
 
    ```sh
-   cd /var/tmp/<unpacked-folder>
+   cd /var/tmp/boot-arch-linux-on-CM1406-v1.40
    sudo bash install.sh
    ```
 
