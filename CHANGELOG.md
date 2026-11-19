@@ -1,5 +1,40 @@
 # Changelog
 
+## v1.50
+
+Not tested on the CM1406 yet; the automated tests are mocks.
+
+New:
+
+- **Keys** (`install-hyprland.sh`, `scripts/install-desktop.sh`): `F6`/`F7` screen brightness down/up, `F8` keyboard
+  backlight on/off (`tarkin-kbd-backlight`, first `*kbd_backlight*` LED, quiet when there is none), next to the
+  existing `F13`/`F14` volume keys and `XF86` keys (`XF86KbdLightOnOff` added). New configs get them; an existing
+  `hyprland.lua`/`hyprland.conf` gets them appended once unless it already binds F6-F8, loads other files or stops
+  verifying (then it is restored).
+- **Smooth mode (optional, off by default)**: `sudo tarkin-smooth on|off`, `tarkin-smooth status`. GPU minimum
+  526 MHz when listed in `available_frequencies` (factory 390 MHz) and Hyprland clamped to a minimum utilization of
+  512 so it stays on the fast cores; kept across reboots by `tarkin-smooth.service`; `off` restores the saved values.
+- **First-boot failure report**: `install-hyprland.sh` names its steps; when the first boot fails,
+  `/var/lib/tarkin/firstboot.reason` holds the step, the reason and what to type, every new terminal shows it, open
+  terminals get a one-line message, and `check-usb.sh` and `tarkin-diag` print it.
+
+Fixed:
+
+- `install-gpuapp.sh`: `pkgconf` is installed and checked (the build stopped with "Could NOT find PkgConfig" on a
+  fresh stick).
+- Rerunning `install-hyprland.sh` on a stick made before v1.40: it stopped because GDM was enabled, and it replaced
+  `tarkin-session` with a short name for `tarkin-display` without installing `tarkin-display`. It now installs
+  `tarkin-display`, `display-guard` and the current `tarkin-console.service` from the release tree, disables GDM for
+  the next boot when no display owner was ever chosen, and keeps the old `tarkin-session` when `tarkin-display` is
+  still missing. `cage` is in the package list.
+- The first boot no longer stops on optional parts: missing `hypridle`, `swaylock` or `python3` only skip the screen
+  lock; missing GNOME or GDM only matters with `--with-gdm`; when installing all packages at once fails, they are
+  retried one by one and the ones that still fail are listed.
+- `--dry-run` no longer says it would disable GDM when the real run does not.
+
+Tests: `tests/test_v150.py` (keys, keyboard backlight, smooth mode, older sticks, first-boot report, packages) and one
+more display-owner case in `tests/test-display.py`.
+
 ## v1.40
 
 Follows the release tagged v1.35 on GitHub. That release already contained everything from the section "Between

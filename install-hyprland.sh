@@ -1,14 +1,25 @@
 #!/bin/bash
-set -euo pipefail
+set -Eeuo pipefail
 
-die()  { echo "[-] $*" >&2; exit 1; }
+STEP=""
+record_step() {
+  [[ -n "${TARKIN_STEP_FILE:-}" ]] || return 0
+  printf '%s\n%s\n' "${STEP:-start}" "${1:-}" > "$TARKIN_STEP_FILE" 2>/dev/null || true
+}
+die()  { echo "[-] $*" >&2; record_step "$*"; exit 1; }
 info() { echo "== $*"; }
 warn() { echo "[!] $*" >&2; }
 ok()   { echo "[+] $*"; }
+step() { STEP="$1"; echo "== Step: $1"; record_step ""; }
+on_error() {
+  [[ -n "${TARKIN_STEP_FILE:-}" ]] || return 0
+  [[ -z "$(sed -n 2p "$TARKIN_STEP_FILE" 2>/dev/null)" ]] || return 0
+  record_step "command failed: $1"
+}
 
 usage() {
 cat <<'USAGE_EOF'
-Usage: bash install-hyprland.sh [options]          (boot-arch-linux-on-CM1406 v1.40)
+Usage: bash install-hyprland.sh [options]          (boot-arch-linux-on-CM1406 v1.50)
 
 Installs Hyprland and makes it render on the Mali-G57 GPU with the ChromeOS
 libmali and a small EGL shim, instead of falling back to the CPU.
@@ -44,11 +55,14 @@ Environment:
   TARKIN_PREFIX=D  Install everything under D instead of / (staging/testing only;
                    skips pacman and systemctl).
 
-A stick made with the one-command installer (v1.40) runs this script by itself at the
+A stick made with the one-command installer (v1.40 or later) runs this script by itself at the
 first boot (tarkin-firstboot.service, as alarm); run it by hand only to repeat or repair.
 
 It also installs Bluetooth (bluez, blueman, pavucontrol) and the light lock:
 Super+L, lock after 5 min idle, screen off at 5 min 30 s, never suspends.
+Keys: F6/F7 screen brightness, F8 keyboard backlight, F13/F14 volume.
+Optional smooth mode (GPU minimum 526 MHz, Hyprland on the fast cores):
+sudo tarkin-smooth on   (undo: sudo tarkin-smooth off)
 
 After installing: reboot; Hyprland (Mali GPU) starts by itself. Sound check: tarkin-audio-test
 With --with-gdm: reboot, then in GDM click the gear and pick "Hyprland (Mali GPU)".
@@ -127,6 +141,7 @@ cleanup() {
   return 0
 }
 trap cleanup EXIT
+trap 'on_error "$BASH_COMMAND"' ERR
 
 sys() {
   if (( DRY_RUN )); then
@@ -179,7 +194,7 @@ install_packages() {
   sys pacman -Syu --noconfirm --noprogressbar --ignore linux-aarch64,linux-aarch64-headers
   local want=() avail=() p
   local base=(hyprland xdg-desktop-portal-hyprland gcc libglvnd mesa libc++ libc++abi libdrm python-pip)
-  local apps=(waybar fuzzel swaybg mako foot brightnessctl papirus-icon-theme adw-gtk-theme inter-font noto-fonts noto-fonts-emoji pcmanfm)
+  local apps=(waybar fuzzel swaybg mako foot cage brightnessctl papirus-icon-theme adw-gtk-theme inter-font noto-fonts noto-fonts-emoji pcmanfm)
   local audio=(pipewire wireplumber pipewire-pulse libpulse alsa-utils alsa-ucm-conf python bluez bluez-utils blueman pavucontrol hypridle swaylock)
   for p in "${base[@]}" "${apps[@]}" "${audio[@]}"; do
     if [[ "$p" == pipewire-pulse ]] && pacman -Q pulseaudio >/dev/null 2>&1; then
@@ -208,13 +223,26 @@ install_packages() {
   done
   if (( ${#avail[@]} )); then
     info "Installing: ${avail[*]}"
-    sys pacman -S --needed --noconfirm --noprogressbar "${avail[@]}"
+    if ! sys pacman -S --needed --noconfirm --noprogressbar "${avail[@]}"; then
+      warn "Installing all packages at once failed; trying them one by one."
+      local failed=()
+      for p in "${avail[@]}"; do
+        sys pacman -S --needed --noconfirm --noprogressbar "$p" || failed+=("$p")
+      done
+      (( ${#failed[@]} == 0 )) || warn "Not installed: ${failed[*]}. Retry later with: sudo pacman -S --needed ${failed[*]}"
+    fi
   else
     info "All packages are already installed."
   fi
-  local c
-  for c in Hyprland start-hyprland gdm gnome-shell gcc; do
-    command -v "$c" >/dev/null 2>&1 || die "$c is missing after the package step; see the pacman output above."
+  local c required=(Hyprland start-hyprland gcc)
+  if (( WITH_GDM )); then
+    required+=(gdm gnome-shell)
+  fi
+  for c in "${required[@]}"; do
+    command -v "$c" >/dev/null 2>&1 || die "$c is missing after the package step; see the pacman output above. Retry: sudo pacman -Syu --ignore linux-aarch64,linux-aarch64-headers, then bash ~/install-hyprland.sh"
+  done
+  for c in gdm gnome-shell; do
+    command -v "$c" >/dev/null 2>&1 || warn "$c is not installed (optional: GNOME and --with-gdm only)."
   done
 }
 
@@ -1035,7 +1063,11 @@ echo "tarkin-display is missing. Reinstall the v1.40 rootfs tools before changin
 exit 1
 TARKIN_SESSION_EOF
   sys install -D -m 755 "$tmp/console" "$CONSOLE"
-  sys install -D -m 755 "$tmp/tarkin-session" "$TARKIN_SESSION_BIN"
+  if [[ -x "$PREFIX/usr/local/bin/tarkin-display" ]]; then
+    sys install -D -m 755 "$tmp/tarkin-session" "$TARKIN_SESSION_BIN"
+  else
+    warn "tarkin-display is missing, so the old $TARKIN_SESSION_BIN is kept. Run install-hyprland.sh from the complete release tree to get tarkin-display."
+  fi
   rm -rf "$tmp"
   ok "Console updated: $CONSOLE (tries hyprland-mali, then Hyprland, then software, then the terminal)"
 }
@@ -1080,16 +1112,61 @@ comfort_source_root() {
   fi
 }
 
+install_display_tools() {
+  local source_dir f mode changed=0
+  if ! source_dir="$(comfort_source_root)" || [[ "$source_dir" == / ]]; then
+    return 0
+  fi
+  for f in usr/local/bin/tarkin-display usr/local/libexec/tarkin/display-guard etc/systemd/system/tarkin-console.service; do
+    [[ -f "$source_dir/$f" ]] || continue
+    mode=755
+    [[ "$f" != etc/* ]] || mode=644
+    if [[ -e "$PREFIX/$f" ]]; then
+      cmp -s "$source_dir/$f" "$PREFIX/$f" && continue
+      sys cp -p "$PREFIX/$f" "$PREFIX/$f.before-v150"
+    fi
+    sys install -D -m "$mode" "$source_dir/$f" "$PREFIX/$f"
+    ok "Installed $PREFIX/$f from this release."
+    changed=1
+  done
+  if (( changed )) && [[ -z "$PREFIX" ]]; then
+    sys systemctl daemon-reload || true
+  fi
+}
+
+COMFORT_READY=1
+
 install_comfort_files() {
   if [[ -z "$PREFIX" ]]; then
-    local command_name
+    local command_name missing=()
     for command_name in hypridle swaylock python3; do
-      command -v "$command_name" >/dev/null 2>&1 ||
-        die "Missing $command_name. Install comfort dependencies: sudo pacman -S --needed hypridle swaylock python"
+      command -v "$command_name" >/dev/null 2>&1 || missing+=("$command_name")
     done
+    if (( ${#missing[@]} )); then
+      COMFORT_READY=0
+      warn "Missing ${missing[*]}: the screen lock (Super+L, idle lock) is skipped; everything else goes on. Later: sudo pacman -S --needed hypridle swaylock python, then bash ~/install-hyprland.sh --config-only"
+    fi
   fi
   local source_dir
   source_dir="$(comfort_source_root)" || die "Missing rootfs/ next to this script; use the complete release tree, not install-hyprland.sh alone."
+  local extras=(
+    usr/local/bin/tarkin-kbd-backlight
+    usr/local/bin/tarkin-smooth
+    usr/local/libexec/tarkin/smooth
+    etc/systemd/system/tarkin-smooth.service
+  )
+  local f mode
+  for f in "${extras[@]}"; do
+    mode=644
+    case "$f" in usr/local/bin/*|usr/local/libexec/*) mode=755 ;; esac
+    if [[ "$source_dir" == / ]]; then
+      [[ -e "/$f" ]] || warn "Missing /$f (optional, v1.50). Run install-hyprland.sh from the complete v1.50 release tree to get it."
+    elif [[ ! -f "$source_dir/$f" ]]; then
+      warn "Missing $source_dir/$f (optional); skipped."
+    elif [[ ! -e "$PREFIX/$f" ]] || ! cmp -s "$source_dir/$f" "$PREFIX/$f"; then
+      sys install -D -m "$mode" "$source_dir/$f" "$PREFIX/$f"
+    fi
+  done
   local files=(
     usr/local/bin/tarkin-lock
     usr/local/bin/tarkin-dpms
@@ -1099,7 +1176,6 @@ install_comfort_files() {
     etc/xdg/tarkin/swaylock.config
     etc/wireplumber/wireplumber.conf.d/52-tarkin-bluetooth.conf
   )
-  local f mode
   for f in "${files[@]}"; do
     if [[ "$source_dir" == / ]]; then
       [[ -f "/$f" ]] || die "Missing /$f: this stick lacks the v1.40 files. Run install-hyprland.sh from the complete v1.40 release tree."
@@ -1124,6 +1200,10 @@ install_comfort_files() {
 }
 
 configure_comfort() {
+  if (( ! COMFORT_READY )); then
+    warn "Screen lock dependencies are missing; no lock bindings were added."
+    return 0
+  fi
   if [[ -z "$PREFIX" ]] && [[ ! -x /usr/local/bin/tarkin-lock || ! -x /usr/local/bin/tarkin-comfort-start ]]; then
     warn "Comfort helpers are missing; Hyprland config is kept without adding inactive lock bindings. Run the complete install-hyprland.sh (not --config-only) from this release."
     return 0
@@ -1168,6 +1248,56 @@ COMFORT_CONF
   done
 }
 
+configure_keys() {
+  local cfg="${XDG_CONFIG_HOME:-$HOME/.config}" file pattern
+  for file in "$cfg/hypr/hyprland.lua" "$cfg/hypr/hyprland.conf"; do
+    [[ -f "$file" ]] || continue
+    grep -q 'tarkin-kbd-backlight' "$file" && continue
+    if grep -Eq 'source[[:space:]]*=|dofile|require' "$file"; then
+      warn "$file loads other files; add the F6/F7/F8 keys yourself (docs/REFERENCE.md, Keys)."
+      continue
+    fi
+    if [[ "$file" == *.lua ]]; then
+      pattern='"F[678]"'
+    else
+      pattern='^[[:space:]]*bind[a-z]*[[:space:]]*=[[:space:]]*,[[:space:]]*F[678][[:space:]]*,'
+    fi
+    if grep -Eq "$pattern" "$file"; then
+      warn "Keeping your own F6/F7/F8 bindings in $file."
+      continue
+    fi
+    cp -p "$file" "$file.before-tarkin-keys"
+    if [[ "$file" == *.lua ]]; then
+      cat >> "$file" <<'KEYS_LUA'
+
+hl.bind("F6", hl.dsp.exec_cmd("brightnessctl set 5%- --min-value=1"), { locked = true, repeating = true })
+hl.bind("F7", hl.dsp.exec_cmd("brightnessctl set 5%+"), { locked = true, repeating = true })
+hl.bind("F8", hl.dsp.exec_cmd("/usr/local/bin/tarkin-kbd-backlight"), { locked = true })
+hl.bind("XF86KbdLightOnOff", hl.dsp.exec_cmd("/usr/local/bin/tarkin-kbd-backlight"), { locked = true })
+KEYS_LUA
+    else
+      cat >> "$file" <<'KEYS_CONF'
+
+bindel = , F6, exec, brightnessctl set 5%- --min-value=1
+bindel = , F7, exec, brightnessctl set 5%+
+bindl = , F8, exec, /usr/local/bin/tarkin-kbd-backlight
+bindl = , XF86KbdLightOnOff, exec, /usr/local/bin/tarkin-kbd-backlight
+KEYS_CONF
+    fi
+    if ! Hyprland --verify-config >/dev/null 2>&1; then
+      cp -p "$file.before-tarkin-keys" "$file"
+      warn "Hyprland rejected the F6/F7/F8 keys; restored $file. Add them by hand (docs/REFERENCE.md, Keys)."
+      continue
+    fi
+    ok "Added F6/F7 (screen brightness) and F8 (keyboard backlight) to $file."
+  done
+}
+
+configure_desktop_extras() {
+  configure_comfort
+  configure_keys
+}
+
 enable_bluetooth() {
   [[ -z "$PREFIX" ]] || return 0
   command -v bluetoothctl >/dev/null 2>&1 || { warn "Bluetooth tools missing. Install: sudo pacman -S --needed bluez bluez-utils"; return 1; }
@@ -1194,13 +1324,13 @@ write_hyprland_config() {
   fi
   if (( ! RESET_CONFIG )) && [[ ! -e "$lua" && -e "$conf" ]]; then
     ok "Keeping the existing legacy $conf."
-    configure_comfort
+    configure_desktop_extras
     return 0
   fi
   if [[ -f "$lua" && $RESET_CONFIG -eq 0 ]]; then
     if Hyprland --verify-config >/dev/null 2>&1; then
       ok "Keeping the existing $lua (it verifies)."
-      configure_comfort
+      configure_desktop_extras
       return 0
     fi
     die "$lua has errors and was preserved. Run Hyprland --verify-config, fix it, or explicitly use --reset-config (backup kept)."
@@ -1289,6 +1419,10 @@ hl.bind("XF86AudioMute",         hl.dsp.exec_cmd("wpctl set-mute @DEFAULT_AUDIO_
 hl.bind("XF86AudioMicMute",      hl.dsp.exec_cmd("wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle"), { locked = true })
 hl.bind("F13", hl.dsp.exec_cmd("wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-"), { locked = true, repeating = true })
 hl.bind("F14", hl.dsp.exec_cmd("wpctl set-volume -l 1 @DEFAULT_AUDIO_SINK@ 5%+"), { locked = true, repeating = true })
+hl.bind("F6", hl.dsp.exec_cmd("brightnessctl set 5%- --min-value=1"), { locked = true, repeating = true })
+hl.bind("F7", hl.dsp.exec_cmd("brightnessctl set 5%+"), { locked = true, repeating = true })
+hl.bind("F8", hl.dsp.exec_cmd("/usr/local/bin/tarkin-kbd-backlight"), { locked = true })
+hl.bind("XF86KbdLightOnOff", hl.dsp.exec_cmd("/usr/local/bin/tarkin-kbd-backlight"), { locked = true })
 EOF
   cat > "$conf" <<EOF
 monitor = , preferred, auto, 1
@@ -1362,6 +1496,10 @@ bindl = , XF86AudioMute, exec, wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle
 bindl = , XF86AudioMicMute, exec, wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle
 bindel = , F13, exec, wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-
 bindel = , F14, exec, wpctl set-volume -l 1 @DEFAULT_AUDIO_SINK@ 5%+
+bindel = , F6, exec, brightnessctl set 5%- --min-value=1
+bindel = , F7, exec, brightnessctl set 5%+
+bindl = , F8, exec, /usr/local/bin/tarkin-kbd-backlight
+bindl = , XF86KbdLightOnOff, exec, /usr/local/bin/tarkin-kbd-backlight
 EOF
   local verify_out
   if ! verify_out="$(Hyprland --verify-config 2>&1)"; then
@@ -1369,7 +1507,7 @@ EOF
     die "The generated config does not verify; Hyprland reported the errors above. Check $lua"
   fi
   ok "Wrote $lua and $conf; Hyprland verifies them."
-  configure_comfort
+  configure_desktop_extras
 }
 
 set_console_session_desktop() {
@@ -1395,11 +1533,20 @@ has_console_unit() {
   [[ -e /usr/lib/systemd/system/tarkin-console.service || -e /etc/systemd/system/tarkin-console.service ]]
 }
 
+LEGACY_GDM=0
+
 assert_display_owner() {
   [[ -n "$PREFIX" ]] && return 0
   local wanted="$1" dm=/etc/systemd/system/display-manager.service owner
   owner="$(cat /etc/tarkin/display-owner 2>/dev/null || true)"
   [[ "$owner" != xfce ]] || die "XFCE owns the next boot. Use sudo tarkin-display hyprland, reboot, then rerun this installer."
+  if [[ "$wanted" == console && ! -e /etc/tarkin/display-owner ]] &&
+     { [[ ! -e "$dm" && ! -L "$dm" ]] || [[ -L "$dm" && "$(readlink "$dm")" == /usr/lib/systemd/system/gdm.service ]]; } &&
+     ! systemctl is-enabled --quiet sddm.service 2>/dev/null && ! systemctl is-active --quiet sddm.service 2>/dev/null &&
+     { systemctl is-enabled --quiet gdm.service 2>/dev/null || systemctl is-active --quiet gdm.service 2>/dev/null; }; then
+    LEGACY_GDM=1
+    return 0
+  fi
   if [[ -e "$dm" || -L "$dm" ]]; then
     [[ "$wanted" == gdm && -L "$dm" && "$(readlink "$dm")" == /usr/lib/systemd/system/gdm.service ]] ||
       die "A display manager alias already reserves the screen. Use sudo tarkin-display hyprland (or terminal), reboot, then retry. Unfamiliar aliases must be reviewed manually."
@@ -1416,8 +1563,18 @@ enable_console_display() {
   if [[ -n "$PREFIX" ]]; then
     return 0
   fi
-  has_console_unit || die "tarkin-console.service is missing. Reinstall the rootfs tools; refusing an implicit GDM fallback."
+  has_console_unit || die "tarkin-console.service is missing. Run install-hyprland.sh from the complete release tree (it installs it); refusing an implicit GDM fallback."
   assert_display_owner console
+  if (( LEGACY_GDM )); then
+    sys systemctl disable gdm.service
+    sys rm -f /etc/systemd/system/display-manager.service
+    local tmp
+    tmp="$(mktemp)"
+    printf 'hyprland\n' > "$tmp"
+    sys install -D -m 644 "$tmp" /etc/tarkin/display-owner
+    rm -f "$tmp"
+    ok "GDM disabled for the next boot (stick made before v1.40; the running screen is not stopped). GNOME stays installed."
+  fi
   set_console_session_desktop
   sys systemctl enable tarkin-console.service
   sys systemctl set-default multi-user.target
@@ -1474,7 +1631,7 @@ clear_firstboot_markers() {
     return 0
   fi
   if [[ -e "$d/firstboot.pending" || -e "$d/firstboot.failed" ]]; then
-    sys rm -f "$d/firstboot.pending" "$d/firstboot.failed" "$d/firstboot.attempts"
+    sys rm -f "$d/firstboot.pending" "$d/firstboot.failed" "$d/firstboot.attempts" "$d/firstboot.reason"
     sys touch "$d/firstboot.done"
     sys systemctl disable tarkin-firstboot.service >/dev/null 2>&1 || true
     ok "First-boot setup marked as done."
@@ -1507,6 +1664,7 @@ remove_files() {
 }
 
 main() {
+  step "checking the system"
   check_environment
 
   if (( REMOVE )); then
@@ -1548,10 +1706,15 @@ main() {
     fi
     info "Would write: $WRAPPER, $SESSION and (if a tarkin-console exists) the GPU-aware console."
     if [[ -z "$PREFIX" ]] && (( ! GPU_ONLY )); then
-      if (( WITH_GDM )) || ! has_console_unit; then
+      if (( WITH_GDM )); then
         info "Would enable gdm.service, disable tarkin-console.service and set graphical.target."
       else
-        info "Would disable gdm.service, enable tarkin-console.service (Hyprland starts by itself) and set multi-user.target."
+        assert_display_owner console
+        if (( LEGACY_GDM )); then
+          info "Would disable gdm.service (stick made before v1.40), enable tarkin-console.service (Hyprland starts by itself) and set multi-user.target."
+        else
+          info "Would enable tarkin-console.service (Hyprland starts by itself) and set multi-user.target."
+        fi
       fi
     fi
     if [[ -z "$PREFIX" ]] && (( ! GPU_ONLY )); then
@@ -1565,28 +1728,35 @@ main() {
   fi
 
   if (( ! GPU_ONLY )); then
+    step "checking who owns the screen"
     if (( WITH_GDM )); then assert_display_owner gdm; else assert_display_owner console; fi
   fi
 
   if will_install_packages; then
+    step "installing packages"
     install_packages
     check_build_tools
   fi
 
+  step "GPU driver (libmali, EGL shim, GPU probes)"
   install_gpu_stack
 
+  step "console and display tools"
+  install_display_tools
   if [[ -e "$PREFIX/usr/local/bin/tarkin-session" || -e "$CONSOLE" ]]; then
     write_console_files
     fix_console_env
   fi
 
   if (( ! GPU_ONLY )); then
+    step "Hyprland config, keys and screen lock"
     install_comfort_files
     write_hyprland_config
   fi
 
   DISPLAY_MODE=unchanged
   if (( ! GPU_ONLY )); then
+    step "display at boot, sound and Bluetooth"
     if (( WITH_GDM )); then
       enable_gdm
       DISPLAY_MODE=gdm
@@ -1597,11 +1767,14 @@ main() {
     enable_bluetooth || warn "Bluetooth is not ready; Hyprland, the GPU stack and sound are installed anyway. Fix it with the command above, then: sudo systemctl enable --now bluetooth.service && bluetoothctl power on"
   fi
 
+  step "launcher check"
   test_wrapper
 
   if (( ! GPU_ONLY )); then
     clear_firstboot_markers
   fi
+  STEP="finished"
+  record_step ""
 
   echo
   echo "=================================================="
@@ -1620,6 +1793,7 @@ main() {
     echo "      2. Check the GPU afterwards with: tarkin-gpu-check (or sudo tarkin-diag)"
     echo "      3. Check the sound with: tarkin-audio-test"
     echo "      4. Terminal only, from the next boot: sudo tarkin-display terminal (back: sudo tarkin-display hyprland)"
+    echo "      5. Optional smooth mode: sudo tarkin-smooth on   (undo: sudo tarkin-smooth off)"
   elif [[ -z "$PREFIX" ]]; then
     echo "    Display   : GDM (GNOME is untouched; tarkin-console is disabled)"
     echo

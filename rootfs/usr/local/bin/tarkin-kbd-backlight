@@ -1,0 +1,28 @@
+#!/bin/bash
+set -u
+leds="${TARKIN_LEDS_DIR:-/sys/class/leds}"
+command -v brightnessctl >/dev/null 2>&1 || exit 0
+dev=""
+for d in "$leds"/*kbd_backlight*; do
+  [[ -e "$d" ]] || continue
+  dev="${d##*/}"
+  break
+done
+[[ -n "$dev" ]] || exit 0
+cur="$(brightnessctl -d "$dev" get 2>/dev/null)" || exit 0
+max="$(brightnessctl -d "$dev" max 2>/dev/null)" || exit 0
+[[ "$cur" =~ ^[0-9]+$ && "$max" =~ ^[0-9]+$ && "$max" -gt 0 ]] || exit 0
+state="${XDG_RUNTIME_DIR:-/tmp}/tarkin-kbd-backlight.$(id -u)"
+case "${1:-toggle}" in
+  toggle) ;;
+  *) echo "Usage: tarkin-kbd-backlight [toggle]" >&2; exit 1 ;;
+esac
+if (( cur > 0 )); then
+  printf '%s\n' "$cur" > "$state" 2>/dev/null || true
+  brightnessctl -q -d "$dev" set 0 >/dev/null 2>&1 || exit 0
+else
+  last="$(cat "$state" 2>/dev/null || true)"
+  [[ "$last" =~ ^[0-9]+$ && "$last" -gt 0 && "$last" -le "$max" ]] || last="$max"
+  brightnessctl -q -d "$dev" set "$last" >/dev/null 2>&1 || exit 0
+fi
+exit 0

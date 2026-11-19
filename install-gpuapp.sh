@@ -14,7 +14,7 @@ ok()   { echo "[+] $*"; }
 
 usage() {
 cat <<'USAGE_EOF'
-Usage: bash install-gpuapp.sh [options]            (boot-arch-linux-on-CM1406 v1.40)
+Usage: bash install-gpuapp.sh [options]            (boot-arch-linux-on-CM1406 v1.50)
 
 Optional. Installs `gpuapp`, a command that runs one program on the Mali-G57 GPU
 (Mesa Zink on the Vulkan driver of the ChromeOS libmali) instead of the CPU:
@@ -101,7 +101,7 @@ PROC_ROOT="${TARKIN_PROC_ROOT:-/proc}"
 WSI_REPO="https://gitlab.freedesktop.org/mesa/vulkan-wsi-layer.git"
 WSI_COMMIT="f5148d4f8c541f8aeddc88170b9e2dbbea2e8b43"
 WSI_PATCH_SHA256="f4ae1ba7a575e1bfac06120f52f404d932d9c955b309539912483e295b3f82db"
-PACKAGES=(vulkan-icd-loader vulkan-tools mesa-utils wayland-utils git cmake gcc make vulkan-headers wayland-protocols libdrm)
+PACKAGES=(vulkan-icd-loader vulkan-tools mesa-utils wayland-utils git cmake gcc make pkgconf vulkan-headers wayland-protocols libdrm)
 
 WORK_TMP=""
 cleanup() {
@@ -189,7 +189,7 @@ install_packages() {
 
 check_build_tools() {
   local c
-  for c in git cmake make gcc sha256sum timeout; do
+  for c in git cmake make gcc pkg-config sha256sum timeout; do
     command -v "$c" >/dev/null 2>&1 || die "$c is missing; install it with: sudo pacman -S --needed ${PACKAGES[*]}"
   done
 }

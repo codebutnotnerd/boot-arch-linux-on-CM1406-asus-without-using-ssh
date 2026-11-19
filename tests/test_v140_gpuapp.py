@@ -94,6 +94,7 @@ case "$1" in
       esac ;;
 esac
 """)
+        self.mock("pkg-config", "#!/bin/bash\nexit 0\n")
         self.mock("cmake", "#!/bin/bash\necho \"cmake $*\" >> \"$CALLS\"\nmkdir -p build\n")
         self.mock("make", """#!/bin/bash
 echo "make $*" >> "$CALLS"
@@ -248,6 +249,13 @@ exec seq -f '%.0f: 0000000000a1b2c3   120 FUNC    GLOBAL DEFAULT   12 mali_symbo
         line = next(l for l in SCRIPT.read_text().splitlines() if "readelf --dyn-syms" in l)
         self.assertIn("| grep -c 'vk_icd' >/dev/null", line)
         self.assertNotRegex(line, r"grep\s+(-[A-Za-z]*q|--quiet|-[A-Za-z]*m)")
+
+    def test_package_list_has_pkgconf_for_the_layer_build(self):
+        text = SCRIPT.read_text()
+        packages = next(l for l in text.splitlines() if l.startswith("PACKAGES=("))
+        self.assertIn(" pkgconf ", packages)
+        tools = next(l for l in text.splitlines() if l.strip().startswith("for c in git cmake"))
+        self.assertIn(" pkg-config ", tools)
 
     def test_refuses_when_no_hyprland_runs(self):
         self.assert_refused("The desktop is not on the GPU", HYPR_PIDS="")

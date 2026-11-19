@@ -1,4 +1,4 @@
-# Reference (v1.40)
+# Reference (v1.50)
 
 Full details. The short version is in [README.md](../README.md).
 
@@ -19,6 +19,9 @@ New in v1.40 and not tested on the hardware yet: the GPU driver discovery on a f
 the light lock and the Bluetooth setup done by `install-hyprland.sh` ([Bluetooth and lock](#bluetooth-and-screen-lock)),
 `tarkin-update` ([Updates](#updates)), the XFCE + SDDM option ([XFCE](#xfce-with-sddm-optional)) and the
 `tarkin-firefox-widevine` helper ([docs/FIREFOX-WIDEVINE.md](FIREFOX-WIDEVINE.md)).
+New in v1.50 and not tested on the hardware yet: the F6/F7/F8 keys ([Keys](#keys)), smooth mode
+([Smooth mode](#smooth-mode-optional)), the first-boot failure report ([When it doesn't work](#when-it-doesnt-work))
+and rerunning `install-hyprland.sh` on a stick made before v1.40 ([Older sticks](#older-sticks)).
 
 Reported working by testers: Bluetooth with audio (a JBL speaker, set up by hand), and the keyboard backlight LEDs. The touchpad is detected; it is tuned
 only in the Hyprland desktop (see [Touchpad](#touchpad)). Not tested at all: suspend (it is off), touchscreen. The GPU is unused
@@ -172,7 +175,7 @@ The script installs `hyprland`, `waybar`, `fuzzel`, `mako`, `swaybg`, `foot`, Pa
 `adw-gtk-theme`, `pcmanfm` and `brightnessctl`, and writes a dark Windows-11-like setup into `~/.config` (taskbar centred at the
 bottom, start menu on `fuzzel`). The screen restarts and shows the desktop, and keeps doing so at every boot.
 
-Keys: `Super+d` start menu, `Super+Enter` terminal, `Super+e` files, `Super+q` close window, `Super+f` fullscreen, `Super+Shift+e` quit Hyprland. The brightness and volume keys work (`brightnessctl`, `wpctl`).
+Keys: `Super+d` start menu, `Super+Enter` terminal, `Super+e` files, `Super+q` close window, `Super+f` fullscreen, `Super+Shift+e` quit Hyprland. The brightness and volume keys work (`brightnessctl`, `wpctl`); see [Keys](#keys).
 
 To go back to the plain terminal: `sudo tarkin-session terminal`, then reboot. Since v1.40 `tarkin-session
 desktop|terminal` is a short name for `tarkin-display hyprland|terminal`: it prepares the **next boot** and no longer
@@ -183,6 +186,47 @@ the default, means `auto`). The software settings come from the Mesa and Hyprlan
 confirmed on this machine. `bash ~/install-desktop.sh --configs-only` only rewrites the config files: an existing
 `hyprland.lua` that verifies is kept (old copies are `*.bak.*`), `--reset-config` rewrites it. Rendering is in software
 unless the GPU stack is installed.
+
+### Keys
+
+| Key | Action | Command |
+|---|---|---|
+| `F6` / `F7` | Screen brightness down / up (5 %, never fully off) | `brightnessctl set 5%-` / `5%+` |
+| `F8` | Keyboard backlight on / off | `tarkin-kbd-backlight` |
+| `F13` / `F14` | Volume down / up | `wpctl set-volume` |
+| `XF86MonBrightness*`, `XF86Audio*`, `XF86KbdLightOnOff` | Same actions, when the top row sends these key codes instead | |
+
+All of them also work on the lock screen; brightness and volume repeat while held. F6, F7 and F8 are taken by
+Hyprland, so applications no longer see them (Firefox uses F6 for the address bar and F7 for caret browsing).
+`tarkin-kbd-backlight` takes the first LED named `*kbd_backlight*` under `/sys/class/leds`, turns it off and
+remembers the level, then restores it on the next press (full brightness when nothing was remembered). Without
+such an LED or without `brightnessctl` it does nothing. To see what a key sends: `wev` (package `wev`), then press
+the key; or `sudo libinput debug-events`.
+
+A new config gets these bindings. On an existing one, `install-hyprland.sh` (also `--config-only`) appends them to
+`hyprland.lua` and `hyprland.conf` once, with a copy in `*.before-tarkin-keys`, and keeps the file untouched when it
+already binds F6, F7 or F8, loads other files (`dofile`, `require`, `source =`), or no longer verifies afterwards.
+The Lua form is `hl.bind("F8", hl.dsp.exec_cmd("/usr/local/bin/tarkin-kbd-backlight"), { locked = true })`.
+
+### Smooth mode (optional)
+
+Off by default. It sets the GPU minimum frequency to 526 MHz (factory: 390 MHz, maximum 1100 MHz) and gives
+Hyprland a minimum CPU utilization of 512 (`uclampset`), which makes the scheduler keep it on the two fast cores.
+Programs started from Hyprland do not inherit it. On the CM1406 the same settings, made by hand, made the desktop
+clearly smoother (2026-11-18, not measured). It uses more power.
+
+```sh
+sudo tarkin-smooth on       # now and at every boot
+tarkin-smooth status        # GPU min/current/max, Hyprland's clamp
+sudo tarkin-smooth off      # back to the factory values
+```
+
+`on` enables `tarkin-smooth.service`. The service saves the current GPU minimum in `/var/lib/tarkin/smooth.gpu-min`,
+writes 526000000 to `/sys/class/devfreq/13000000.gpu/min_freq` (the first `*gpu*` or `*mali*` devfreq node when that
+one is missing) only when that value is listed in `available_frequencies`, and every 15 s applies the clamp to any
+new Hyprland process. `off` (or stopping the service) writes the saved value back and sets the clamp to 0. A GPU
+minimum already at 526 MHz or more is left alone. Without a devfreq node or without clamp support in the kernel,
+that half is skipped and the journal says so: `journalctl -u tarkin-smooth -b`.
 
 ### Applications on the GPU (optional)
 
@@ -208,7 +252,7 @@ mode 0660) and `/usr/local/share/applications/firefox-gpu.desktop` when Firefox 
 `/etc/vulkan`: without `gpuapp` no program sees the driver, and Hyprland, `hyprland-mali`, the shim, `console.env`
 and the terminal fallback are unchanged. The script refuses to install when libmali is missing, has no Vulkan driver,
 the Mali probe fails or no running Hyprland has libmali loaded. Packages added: `vulkan-icd-loader`, `vulkan-tools`,
-`mesa-utils`, `wayland-utils`, `git`, `cmake`, `gcc`, `make`, `vulkan-headers`, `wayland-protocols`, `libdrm`.
+`mesa-utils`, `wayland-utils`, `git`, `cmake`, `gcc`, `make`, `pkgconf`, `vulkan-headers`, `wayland-protocols`, `libdrm`.
 
 Checked on the CM1406 (2026-11-18, Hyprland 0.57.2, Mesa 26.2.7): the script installed and `gpuapp --check`
 answered `apps on the GPU: yes (zink Vulkan 1.4(Mali-G57 (ARM_PROPRIETARY)))`; `vkcube --wsi wayland` smooth,
@@ -227,6 +271,8 @@ on the CPU.
 | `sudo tarkin-dns [--keep]` | When names do not resolve but `ping 1.1.1.1` works: Cloudflare then Quad9 on `wlan0`. `--keep` makes it permanent and ignores the router's DNS. |
 | `sudo tarkin-touchpad` | Touchpad diagnosis (see below). |
 | `tarkin-lock` | Locks the Hyprland session with `swaylock` (`Super+L`). |
+| `sudo tarkin-smooth on\|off`, `tarkin-smooth status` | Optional smooth mode. See [Smooth mode](#smooth-mode-optional). |
+| `tarkin-kbd-backlight` | Keyboard backlight on/off (`F8`). |
 | `sudo bash ~/upgrade-stick.sh` | Safe full upgrade: refuses the internal eMMC, needs 2 GiB free, throttles USB writeback, then runs `tarkin-update` (v1.40; a stick without it falls back to the old `pacman -Syu --noconfirm --ignore linux-aarch64,linux-aarch64-headers`). The installer copies `scripts/upgrade-stick.sh` to `/home/alarm`. |
 | `sudo tarkin-update` | Full update (`pacman -Syu`, interactive) that keeps back every package owning kernel, module or header files. See [Updates](#updates). |
 | `sudo tarkin-display hyprland\|xfce\|terminal` | Chooses who owns the screen at the next boot. See [Display owner](#display-owner). |
@@ -335,6 +381,16 @@ code. Do not approve a removal or replacement of the kept kernel packages. There
 Firefox DRM (Widevine, for Spotify) stays separate and optional: nothing installs it for you, no Widevine file is
 shipped, and `tarkin-firefox-widevine` only configures a `widevine` package you built and reviewed yourself. Steps and
 limits (Netflix not tested): [FIREFOX-WIDEVINE.md](FIREFOX-WIDEVINE.md).
+
+### Older sticks
+
+Run `install-hyprland.sh` from the unpacked v1.50 folder (it needs the `rootfs/` next to it), as `alarm`, without
+`sudo`. On a stick made before v1.40 it installs `tarkin-display`, `display-guard` and the current
+`tarkin-console.service` (old copies kept as `*.before-v150`), and `tarkin-session` becomes the short name for
+`tarkin-display` only once `tarkin-display` is there. When GDM is enabled and no `/etc/tarkin/display-owner` exists
+(GDM came from an older release), it disables GDM for the next boot, writes `hyprland` as the display owner and
+enables `tarkin-console`; the running screen is not stopped. With SDDM, an unknown display manager or an existing
+display owner it still stops and says which `tarkin-display` command to run.
 
 ## Display owner
 
@@ -460,7 +516,7 @@ It checks the firmware flags, the partition table, the kernel signature and the 
 | Can't log in on VT2 | The user is `chronos`. |
 | Wrong characters in VT2 | VT2 is QWERTY. |
 | ChromeOS reboots by itself during the install | Fixed: the package step now runs in an isolated chroot (own mount/pid namespace, read-only `/proc/sys`), risky pacman hooks are masked, and the host's panic/vm settings are restored. Run `sudo bash install.sh` again after the reboot: it resumes. The full log is in `/var/tmp/tarkin-install.log`; if it keeps happening, send that file plus `ls /sys/fs/pstore`. |
-| The first-boot setup (Hyprland, GPU, sound) failed | Every terminal says so. Read `tail -n 40 /var/log/tarkin-firstboot.log`, fix the cause (often the network), then `sudo systemctl restart tarkin-firstboot` or `bash ~/install-hyprland.sh` (as `alarm`, without `sudo`). From ChromeOS, `check-usb.sh` prints the end of that log. |
+| The first-boot setup (Hyprland, GPU, sound) failed | Every new terminal shows the step that failed, the reason and what to type; open terminals get a one-line message when it happens. The same is in `/var/lib/tarkin/firstboot.reason` and at the end of `/var/log/tarkin-firstboot.log`. Fix the cause (often the network), then `sudo systemctl restart tarkin-firstboot` or `bash ~/install-hyprland.sh` (as `alarm`, without `sudo`). From ChromeOS, `check-usb.sh` prints the reason and the end of that log. Steps: checking the system, who owns the screen, packages, GPU driver, console and display tools, Hyprland config/keys/lock, display/sound/Bluetooth, launcher check. A package that cannot be installed is skipped with a warning unless Hyprland or `gcc` needs it; missing `hypridle`, `swaylock` or `python3` only skip the screen lock; missing GNOME/GDM only matters with `--with-gdm`. |
 | No sound, or sound on the wrong output | Run `tarkin-audio-test` (as `alarm`) and send the photo of its summary. |
 | `install.sh` finds no USB stick | Replug, wait 5 s, try another port (no hub) or another stick. `dmesg \| tail` should show `sd 0:0:0:0: [sda]`. |
 | `curl` hangs on the rootfs | Download it with the browser (step 1) and put it in `/var/tmp`. |
@@ -542,10 +598,12 @@ To undo everything: remove the stick and boot ChromeOS (`Ctrl+D`). To put the fi
 - `install-xfce.sh`: optional XFCE + SDDM packages and configuration (copied to `/home/alarm`)
 - `install-gpuapp.sh`: optional `gpuapp` launcher, applications on the GPU through Zink (copied to `/home/alarm`)
 - `rootfs/usr/local/bin/tarkin-display`, `rootfs/usr/local/libexec/tarkin/display-guard`: display owner for the next boot
+- `rootfs/usr/local/bin/tarkin-smooth`, `rootfs/usr/local/libexec/tarkin/smooth`, `tarkin-smooth.service`: optional smooth mode
+- `rootfs/usr/local/bin/tarkin-kbd-backlight`: keyboard backlight toggle (`F8`)
 - `rootfs/usr/local/bin/tarkin-update`: protected full update; `tarkin-firefox-widevine`: optional Firefox DRM helper
 - `scripts/recover-display.sh`: offline display recovery from ChromeOS ([DISPLAY-RECOVERY.md](DISPLAY-RECOVERY.md))
 - `tests/`: mocked tests (`python3 -m unittest discover -s tests` runs `test_v140_update.py`,
-  `test_v140_gpuapp.py` and `test_v140_widevine_env.py`; run
+  `test_v140_gpuapp.py`, `test_v140_widevine_env.py` and `test_v150.py`; run
   `python3 tests/test-comfort.py` and, as root in a throwaway container only, `python3 tests/test-display.py`)
 - `scripts/upgrade-stick.sh`: safe system upgrade on the stick (runs `tarkin-update`, writeback throttled; the installer copies it to `/home/alarm`)
 - `scripts/repair-pacman-from-host.sh`: repairs a stick whose pacman transaction was interrupted, from ChromeOS

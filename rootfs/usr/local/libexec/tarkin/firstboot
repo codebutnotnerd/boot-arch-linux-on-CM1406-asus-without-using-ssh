@@ -1,12 +1,15 @@
 #!/bin/bash
 set -u
-PENDING=/var/lib/tarkin/firstboot.pending
-FAILED=/var/lib/tarkin/firstboot.failed
-DONE=/var/lib/tarkin/firstboot.done
-ATTEMPTS=/var/lib/tarkin/firstboot.attempts
-LOG=/var/log/tarkin-firstboot.log
-SUDOERS=/etc/sudoers.d/99-tarkin-firstboot
-CONF=/etc/tarkin/firstboot.conf
+ROOT="${TARKIN_ROOT:-}"
+PENDING=$ROOT/var/lib/tarkin/firstboot.pending
+FAILED=$ROOT/var/lib/tarkin/firstboot.failed
+REASON=$ROOT/var/lib/tarkin/firstboot.reason
+STEP_FILE=$ROOT/var/lib/tarkin/firstboot.step
+DONE=$ROOT/var/lib/tarkin/firstboot.done
+ATTEMPTS=$ROOT/var/lib/tarkin/firstboot.attempts
+LOG=$ROOT/var/log/tarkin-firstboot.log
+SUDOERS=$ROOT/etc/sudoers.d/99-tarkin-firstboot
+CONF=$ROOT/etc/tarkin/firstboot.conf
 USER_NAME=alarm
 MAX_ATTEMPTS=3
 
@@ -22,12 +25,38 @@ log() { echo "[$(date '+%F %T')] tarkin-firstboot: $*"; }
 remove_sudo_rule() { rm -f "$SUDOERS" "$SUDOERS.tmp"; }
 trap remove_sudo_rule EXIT
 
+tell_terminals() {
+  local t
+  for t in "$ROOT"/dev/pts/[0-9]*; do
+    [[ -c "$t" || -f "$t" ]] || continue
+    [[ "$(stat -c %U -- "$t" 2>/dev/null)" == "$USER_NAME" ]] || continue
+    timeout 2 bash -c 'printf "\r\n%s\r\n" "$2" > "$1"' _ "$t" "$1" 2>/dev/null || true
+  done
+}
+
+write_reason() {
+  local step="$1" reason="$2" fix="$3"
+  printf 'step=%s\nreason=%s\nfix=%s\n' "$step" "${reason:-see /var/log/tarkin-firstboot.log}" "$fix" > "$REASON"
+  log "FAILED at step: $step"
+  [[ -z "$reason" ]] || log "Reason: $reason"
+  log "What to do: $fix"
+  tell_terminals "First-boot setup FAILED at step: $step. ${reason:+Reason: $reason. }What to do: $fix (details: tail -n 40 /var/log/tarkin-firstboot.log)"
+}
+
+stop_early() {
+  echo "rc=1 attempt=0 date=$(date -u +%FT%TZ) step=$1" > "$FAILED"
+  write_reason "$1" "$2" "$3"
+  exit 1
+}
+
 [[ -f "$PENDING" ]] || { log "nothing to do ($PENDING is absent)."; exit 0; }
 
-uid="$(id -u "$USER_NAME" 2>/dev/null)" || { log "user $USER_NAME does not exist; giving up."; exit 1; }
+uid="$(id -u "$USER_NAME" 2>/dev/null)" ||
+  stop_early "checking the user" "user $USER_NAME does not exist" "recreate the stick: sudo bash install.sh --fresh (from ChromeOS VT2)"
 home="$(getent passwd "$USER_NAME" | cut -d: -f6)"
 script="$home/install-hyprland.sh"
-[[ -f "$script" ]] || { log "$script is missing; nothing can be installed. Copy it from the repository."; exit 1; }
+[[ -f "$script" ]] ||
+  stop_early "finding install-hyprland.sh" "$script is missing" "copy install-hyprland.sh and rootfs/ from the release to $home, then: bash ~/install-hyprland.sh"
 
 log "Hyprland + Mali GPU + sound for $USER_NAME: starting."
 
@@ -60,9 +89,9 @@ for i in $(seq 1 120); do
 done
 [[ -S "/run/user/$uid/bus" ]] || log "warning: /run/user/$uid/bus is missing; the sound services may only be enabled at the next boot."
 
-if [[ -e /var/lib/pacman/db.lck ]] && ! pgrep -x pacman >/dev/null 2>&1; then
+if [[ -e "$ROOT/var/lib/pacman/db.lck" ]] && ! pgrep -x pacman >/dev/null 2>&1; then
   log "removing a stale pacman lock."
-  rm -f /var/lib/pacman/db.lck
+  rm -f "$ROOT/var/lib/pacman/db.lck"
 fi
 
 remove_sudo_rule
@@ -70,10 +99,14 @@ remove_sudo_rule
   printf 'Defaults:%s verifypw=any\n%s ALL=(ALL:ALL) NOPASSWD: ALL\n' "$USER_NAME" "$USER_NAME" > "$SUDOERS.tmp" )
 chmod 440 "$SUDOERS.tmp"
 if ! visudo -cf "$SUDOERS.tmp" >/dev/null 2>&1; then
-  log "the temporary sudo rule does not parse; giving up."
-  exit 1
+  remove_sudo_rule
+  stop_early "temporary sudo rule" "the temporary sudo rule does not parse" "check sudo: sudo visudo -c, then: bash ~/install-hyprland.sh"
 fi
 mv -f "$SUDOERS.tmp" "$SUDOERS"
+
+rm -f "$STEP_FILE" "$REASON"
+: > "$STEP_FILE"
+chown "$USER_NAME" "$STEP_FILE" 2>/dev/null || chmod 666 "$STEP_FILE"
 
 read -r -a extra <<< "$FIRSTBOOT_ARGS"
 log "running: $script ${extra[*]:-} (as $USER_NAME)"
@@ -83,19 +116,20 @@ runuser -u "$USER_NAME" -- env -i \
   HOME="$home" USER="$USER_NAME" LOGNAME="$USER_NAME" SHELL=/bin/bash LANG=C.UTF-8 TERM=dumb \
   PATH=/usr/local/sbin:/usr/local/bin:/usr/bin \
   XDG_RUNTIME_DIR="/run/user/$uid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
-  TARKIN_FIRSTBOOT=1 \
+  TARKIN_FIRSTBOOT=1 TARKIN_STEP_FILE="$STEP_FILE" \
   bash "$script" ${extra[@]+"${extra[@]}"} </dev/null || rc=$?
 remove_sudo_rule
 
 if (( rc == 0 )); then
-  rm -f "$PENDING" "$FAILED" "$ATTEMPTS"
+  rm -f "$PENDING" "$FAILED" "$ATTEMPTS" "$REASON" "$STEP_FILE"
   date -u +%FT%TZ > "$DONE"
   systemctl disable tarkin-firstboot.service >/dev/null 2>&1 \
-    || rm -f /etc/systemd/system/multi-user.target.wants/tarkin-firstboot.service
+    || rm -f "$ROOT/etc/systemd/system/multi-user.target.wants/tarkin-firstboot.service"
   log "done: Hyprland, the Mali GPU stack and sound are installed."
   sync
   if [[ "$FIRSTBOOT_REBOOT" == 1 ]]; then
     log "restarting in 20 seconds to start Hyprland on a clean system."
+    tell_terminals "First-boot setup finished. The machine restarts into Hyprland in 20 seconds."
     sleep 20
     systemctl reboot
   else
@@ -104,15 +138,17 @@ if (( rc == 0 )); then
   exit 0
 fi
 
-echo "rc=$rc attempt=$n date=$(date -u +%FT%TZ)" > "$FAILED"
+step="$(sed -n 1p "$STEP_FILE" 2>/dev/null)"
+reason="$(sed -n 2p "$STEP_FILE" 2>/dev/null)"
+step="${step:-start}"
+echo "rc=$rc attempt=$n date=$(date -u +%FT%TZ) step=$step" > "$FAILED"
 log "FAILED (exit code $rc). The lines above say why."
 if (( n >= MAX_ATTEMPTS )); then
   rm -f "$PENDING"
   systemctl disable tarkin-firstboot.service >/dev/null 2>&1 || true
-  log "$MAX_ATTEMPTS attempts failed: automatic retries stop here. Fix the cause, then run by hand,"
-  log "  in the terminal as alarm (not with sudo):  bash ~/install-hyprland.sh"
+  log "$MAX_ATTEMPTS attempts failed: automatic retries stop here."
+  write_reason "$step" "$reason" "fix the cause above, then in the terminal as alarm (not with sudo): bash ~/install-hyprland.sh"
 else
-  log "It is tried again at the next boot. To retry now:  sudo systemctl restart tarkin-firstboot"
-  log "  or by hand, in the terminal as alarm (not with sudo):  bash ~/install-hyprland.sh"
+  write_reason "$step" "$reason" "fix the cause above, then: sudo systemctl restart tarkin-firstboot (or reboot; or by hand as alarm, not with sudo: bash ~/install-hyprland.sh)"
 fi
 exit 1

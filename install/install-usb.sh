@@ -935,7 +935,7 @@ if (( DESKTOP )) && (( PKG_OK )) && [[ "${ALLOW_NO_PKGS:-0}" != 1 ]]; then
   if [[ ! -f "$MNT/var/lib/tarkin/firstboot.done" ]]; then
     mkdir -p "$MNT/var/lib/tarkin"
     date -u +%FT%TZ > "$MNT/var/lib/tarkin/firstboot.pending"
-    rm -f "$MNT/var/lib/tarkin/firstboot.failed" "$MNT/var/lib/tarkin/firstboot.attempts"
+    rm -f "$MNT/var/lib/tarkin/firstboot.failed" "$MNT/var/lib/tarkin/firstboot.attempts" "$MNT/var/lib/tarkin/firstboot.reason"
     enable_unit /etc/systemd/system/tarkin-firstboot.service "$WANTS"
     echo "== First-boot setup staged: Hyprland, the Mali GPU stack and sound are installed at the first boot."
   fi

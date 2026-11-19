@@ -89,6 +89,9 @@ if mount -o ro "$P2" "$M" 2>/dev/null; then
   elif [[ -f "$M/var/lib/tarkin/firstboot.failed" ]]; then
     warn "first-boot setup failed and stopped retrying: $(cat "$M/var/lib/tarkin/firstboot.failed")"
   fi
+  if [[ -f "$M/var/lib/tarkin/firstboot.reason" && ! -f "$M/var/lib/tarkin/firstboot.done" ]]; then
+    sed 's/^/  [info]    /' "$M/var/lib/tarkin/firstboot.reason"
+  fi
   if [[ -f "$M/var/log/tarkin-firstboot.log" ]]; then
     echo "== Last lines of the first-boot log (/var/log/tarkin-firstboot.log)"; tail -n 25 "$M/var/log/tarkin-firstboot.log"
   fi

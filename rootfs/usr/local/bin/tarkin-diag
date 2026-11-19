@@ -25,7 +25,7 @@ sh_() { printf '$ %s\n' "$1"; bash -c "$1" 2>&1 | head -n "${LINES_MAX:-80}"; }
 
   section "boot check and first boot"
   sh_ 'systemctl status tarkin-bootcheck --no-pager -n 6; cat /run/tarkin/boot-warnings 2>/dev/null'
-  sh_ 'ls -l /var/lib/tarkin/ 2>&1; cat /var/lib/tarkin/firstboot.failed 2>/dev/null; systemctl is-enabled tarkin-firstboot 2>&1; ls -l /etc/sudoers.d/ 2>&1'
+  sh_ 'ls -l /var/lib/tarkin/ 2>&1; cat /var/lib/tarkin/firstboot.failed /var/lib/tarkin/firstboot.reason 2>/dev/null; systemctl is-enabled tarkin-firstboot 2>&1; ls -l /etc/sudoers.d/ 2>&1'
   LINES_MAX=40 sh_ 'tail -n 40 /var/log/tarkin-firstboot.log 2>/dev/null'
 
   section "console and session"
@@ -34,6 +34,7 @@ sh_() { printf '$ %s\n' "$1"; bash -c "$1" 2>&1 | head -n "${LINES_MAX:-80}"; }
   sh_ 'systemctl status gdm --no-pager -n 8; systemctl is-enabled gdm tarkin-console 2>&1; systemctl get-default; readlink -f /etc/systemd/system/display-manager.service 2>&1'
   sh_ 'command -v Hyprland start-hyprland hyprland-mali labwc cage foot; pacman -Q hyprland hyprland-git aquamarine mesa libinput gdm 2>&1'
   sh_ 'ls -l /usr/local/libexec/tarkin/'
+  sh_ 'tarkin-smooth status 2>&1'
 
   section "hyprland"
   latest="$(ls -dt /run/user/$uid/hypr/*/ 2>/dev/null | head -1)"

@@ -4,7 +4,7 @@ Scripts that put Arch Linux ARM with Hyprland on a USB stick and boot it on an A
 Everything is done on the Chromebook itself: no SSH, no second computer. ChromeOS stays on the internal
 storage and is not modified; unplug the stick and the Chromebook boots ChromeOS as before.
 
-Version 1.40. Details are in [docs/REFERENCE.md](docs/REFERENCE.md), history in [CHANGELOG.md](CHANGELOG.md).
+Version 1.50. Details are in [docs/REFERENCE.md](docs/REFERENCE.md), history in [CHANGELOG.md](CHANGELOG.md).
 
 ## Hardware
 
@@ -33,7 +33,8 @@ Limits:
   goes black on the first key press, so GDM is off by default.
 
 Written but not yet tried on the machine: the automatic first-boot setup from start to finish, finding the GPU
-driver on a freshly made stick, the screen lock, `tarkin-update`, headphone jack switching, the microphones.
+driver on a freshly made stick, the screen lock, `tarkin-update`, headphone jack switching, the microphones, and
+the v1.50 additions (F6/F7/F8 keys, `tarkin-smooth`, the first-boot failure report, rerunning on an older stick).
 The touchscreen and Netflix have not been tried either. The tests in `tests/` run against mocks, not the hardware.
 
 ## What you need
@@ -50,14 +51,14 @@ The touchscreen and Netflix have not been tried either. The tests in `tests/` ru
 
    ```sh
    cd /var/tmp
-   bsdtar -xf ~/MyFiles/Downloads/boot-arch-linux-on-CM1406-asus-without-using-ssh-main.zip
+   bsdtar -xf ~/MyFiles/Downloads/<zip-name>.zip
    ls
    ```
 
 3. Plug in the stick. Switch to VT2 with `Ctrl+Alt+Refresh`, log in as `chronos`, and run:
 
    ```sh
-   cd /var/tmp/boot-arch-linux-on-CM1406-v1.40
+   cd /var/tmp/<unpacked-folder>
    sudo bash install.sh
    ```
 
@@ -104,6 +105,11 @@ Example: `sudo bash install.sh --keymap us`. `sudo bash install.sh --help` lists
 | `Super+F` | Fullscreen |
 | `Super+L` | Lock. Also locks after 5 minutes idle; the screen turns off 30 seconds later. |
 | `Super+Shift+E` | Quit Hyprland |
+| `F6` / `F7` | Screen brightness down / up |
+| `F8` | Keyboard backlight on / off |
+| `F13` / `F14` | Volume down / up |
+
+The brightness, volume and keyboard light keys of the top row also work when they send their own key codes.
 
 Commands on the stick, as `alarm`:
 
@@ -118,6 +124,7 @@ Commands on the stick, as `alarm`:
 | `sudo tarkin-display terminal` | A plain terminal (cage + foot) at the next boot |
 | `sudo tarkin-display xfce` | XFCE at the next boot, after `bash ~/install-xfce.sh` (experimental) |
 | `tarkin-firefox-widevine` | Optional Firefox DRM setup, see [docs/FIREFOX-WIDEVINE.md](docs/FIREFOX-WIDEVINE.md) |
+| `sudo tarkin-smooth on` | Smooth mode: GPU at 526 MHz or more, Hyprland on the fast cores, kept after a reboot. Uses a bit more power. `sudo tarkin-smooth off` undoes it, `tarkin-smooth status` shows it. |
 
 `tarkin-display` never restarts the running screen. Run `sudo reboot` to switch.
 
@@ -156,7 +163,7 @@ addresses are masked, but read it before posting it anywhere.
 | It boots ChromeOS instead of the stick | In VT2: `sudo bash scripts/repair-boot.sh` |
 | Black screen, or stuck on the logo | Boot ChromeOS, then in VT2: `sudo bash scripts/check-usb.sh` |
 | `install.sh` finds no stick | Plug it into another port, without a hub |
-| The first-boot setup failed | `tail -n 40 /var/log/tarkin-firstboot.log`, then `bash ~/install-hyprland.sh` (no `sudo`) |
+| The first-boot setup failed | Open a terminal: it shows the step that failed, why, and what to type. Full log: `tail -n 40 /var/log/tarkin-firstboot.log` |
 | "No usable libmali" during the first boot | Copy a working `libmali.so` to the stick, then `bash ~/install-hyprland.sh --mali-source /path/to/libmali.so` |
 | No internet on the stick | `sudo tarkin-dns --keep`, then `sudo tarkin-diag` |
 | No sound | `tarkin-audio-test` |

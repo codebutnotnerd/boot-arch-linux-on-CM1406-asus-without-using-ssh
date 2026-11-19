@@ -1,0 +1,111 @@
+#!/bin/bash
+set -u
+SYS="${TARKIN_SYSFS:-/sys}"
+STATE="${TARKIN_SMOOTH_STATE:-/var/lib/tarkin}"
+INTERVAL="${TARKIN_SMOOTH_INTERVAL:-15}"
+GPU_HZ=526000000
+UCLAMP_MIN=512
+SAVED="$STATE/smooth.gpu-min"
+
+log() { echo "tarkin-smooth: $*"; }
+
+gpu_dir() {
+  local d
+  for d in "$SYS/class/devfreq/13000000.gpu" "$SYS"/class/devfreq/*gpu* "$SYS"/class/devfreq/*mali*; do
+    if [[ -f "$d/min_freq" && -f "$d/available_frequencies" ]]; then
+      printf '%s\n' "$d"
+      return 0
+    fi
+  done
+  return 1
+}
+
+gpu_on() {
+  local d avail cur
+  if ! d="$(gpu_dir)"; then
+    log "no GPU devfreq node under $SYS/class/devfreq; the GPU floor is skipped."
+    return 0
+  fi
+  avail=" $(tr -s '[:space:]' ' ' < "$d/available_frequencies") "
+  if [[ "$avail" != *" $GPU_HZ "* ]]; then
+    log "$GPU_HZ Hz is not listed in $d/available_frequencies ($avail); the GPU floor is skipped."
+    return 0
+  fi
+  cur="$(cat "$d/min_freq" 2>/dev/null)"
+  if [[ ! "$cur" =~ ^[0-9]+$ ]]; then
+    log "cannot read $d/min_freq; the GPU floor is skipped."
+    return 0
+  fi
+  if [[ ! -s "$SAVED" ]]; then
+    if (( cur >= GPU_HZ )); then
+      log "GPU minimum is already $cur Hz; left unchanged."
+      return 0
+    fi
+    mkdir -p "$STATE"
+    printf '%s %s\n' "$d" "$cur" > "$SAVED"
+  fi
+  if ! echo "$GPU_HZ" > "$d/min_freq"; then
+    log "cannot write $d/min_freq."
+    return 1
+  fi
+  log "GPU minimum frequency set to $GPU_HZ Hz (factory value $(cut -d' ' -f2 "$SAVED") Hz)."
+}
+
+gpu_off() {
+  local d old
+  [[ -s "$SAVED" ]] || return 0
+  read -r d old < "$SAVED"
+  if [[ -f "$d/min_freq" && "$old" =~ ^[0-9]+$ ]]; then
+    if echo "$old" > "$d/min_freq"; then
+      log "GPU minimum frequency restored to $old Hz."
+    else
+      log "cannot restore $d/min_freq to $old; it goes back to the factory value at the next boot."
+    fi
+  fi
+  rm -f "$SAVED"
+}
+
+set_uclamp() {
+  local value="$1" pid
+  command -v uclampset >/dev/null 2>&1 || return 1
+  command -v pgrep >/dev/null 2>&1 || return 1
+  for pid in $(pgrep -x Hyprland); do
+    uclampset -a -R -m "$value" -p "$pid" >/dev/null 2>&1 ||
+      uclampset -a -m "$value" -p "$pid" >/dev/null 2>&1 ||
+      { log "uclampset refused Hyprland ($pid); this kernel may lack utilization clamping."; return 1; }
+    printf '%s\n' "$pid"
+  done
+}
+
+apply() {
+  gpu_on
+  set_uclamp "$UCLAMP_MIN" >/dev/null
+  return 0
+}
+
+run() {
+  local seen="" now
+  gpu_on
+  command -v uclampset >/dev/null 2>&1 || log "uclampset is missing (util-linux); Hyprland is not boosted."
+  while true; do
+    now="$(set_uclamp "$UCLAMP_MIN" | tr '\n' ' ')"
+    if [[ -n "$now" && "$now" != "$seen" ]]; then
+      log "Hyprland ($now) runs with a minimum CPU utilization of $UCLAMP_MIN, which keeps it on the fast cores."
+    fi
+    seen="$now"
+    sleep "$INTERVAL"
+  done
+}
+
+stop() {
+  gpu_off
+  set_uclamp 0 >/dev/null
+  return 0
+}
+
+case "${1:-}" in
+  run) run ;;
+  apply) apply ;;
+  stop) stop ;;
+  *) echo "Usage: smooth run|apply|stop" >&2; exit 1 ;;
+esac

@@ -390,6 +390,10 @@ hl.bind("XF86AudioMute",         hl.dsp.exec_cmd("wpctl set-mute @DEFAULT_AUDIO_
 hl.bind("XF86AudioMicMute",      hl.dsp.exec_cmd("wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle"), { locked = true })
 hl.bind("F13", hl.dsp.exec_cmd("wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-"), { locked = true, repeating = true })
 hl.bind("F14", hl.dsp.exec_cmd("wpctl set-volume -l 1 @DEFAULT_AUDIO_SINK@ 5%+"), { locked = true, repeating = true })
+hl.bind("F6", hl.dsp.exec_cmd("brightnessctl set 5%- --min-value=1"), { locked = true, repeating = true })
+hl.bind("F7", hl.dsp.exec_cmd("brightnessctl set 5%+"), { locked = true, repeating = true })
+hl.bind("F8", hl.dsp.exec_cmd("/usr/local/bin/tarkin-kbd-backlight"), { locked = true })
+hl.bind("XF86KbdLightOnOff", hl.dsp.exec_cmd("/usr/local/bin/tarkin-kbd-backlight"), { locked = true })
 EOF
 
 put "$CFG/hypr/hyprland.conf" <<EOF
@@ -464,6 +468,10 @@ bindl = , XF86AudioMute, exec, wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle
 bindl = , XF86AudioMicMute, exec, wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle
 bindel = , F13, exec, wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-
 bindel = , F14, exec, wpctl set-volume -l 1 @DEFAULT_AUDIO_SINK@ 5%+
+bindel = , F6, exec, brightnessctl set 5%- --min-value=1
+bindel = , F7, exec, brightnessctl set 5%+
+bindl = , F8, exec, /usr/local/bin/tarkin-kbd-backlight
+bindl = , XF86KbdLightOnOff, exec, /usr/local/bin/tarkin-kbd-backlight
 EOF
 if command -v Hyprland >/dev/null 2>&1 && ! Hyprland --verify-config >/dev/null 2>&1; then
   die "The generated config does not verify; Hyprland reported errors. Check $CFG/hypr/"

@@ -218,7 +218,7 @@ sys.stdin.read()
         self.assertIn("rfkill", result.stderr)
 
     def test_firstboot_completes_when_bluetooth_fails(self):
-        steps = ["check_environment", "install_gpu_stack", "write_console_files", "fix_console_env",
+        steps = ["check_environment", "install_gpu_stack", "install_display_tools", "write_console_files", "fix_console_env",
                  "install_comfort_files", "write_hyprland_config", "assert_display_owner",
                  "enable_console_display", "enable_audio", "test_wrapper", "clear_firstboot_markers"]
         stubs = " ".join("%s() { echo CALL:%s; };" % (n, n) for n in steps)

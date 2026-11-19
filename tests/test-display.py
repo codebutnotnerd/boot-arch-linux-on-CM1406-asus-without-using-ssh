@@ -257,6 +257,27 @@ esac
         self.link("/etc/systemd/system/display-manager.service", "/custom/gdm.service")
         self.run_target("/preflight", "gdm", ok=False)
 
+    def test_legacy_gdm_stick_migrates_only_without_owner(self):
+        text = (REPO / "install-hyprland.sh").read_text()
+        helper = text.split("assert_display_owner() {")[1].split("\nenable_console_display()")[0]
+        self.write("/preflight", 'die() { echo "$*" >&2; exit 1; }\nPREFIX=""\nLEGACY_GDM=0\nassert_display_owner() {' + helper + '\nassert_display_owner "$1"\necho "LEGACY=$LEGACY_GDM"\n', 0o755)
+        dm = "/etc/systemd/system/display-manager.service"
+        self.write("/mock-enabled", "gdm.service\n")
+        self.link(dm, "/usr/lib/systemd/system/gdm.service")
+        self.assertIn("LEGACY=1", self.run_target("/preflight", "console").stdout)
+        self.write("/etc/tarkin/display-owner", "hyprland\n")
+        self.run_target("/preflight", "console", ok=False)
+        (self.root / "etc/tarkin/display-owner").unlink()
+        self.write("/mock-enabled", "gdm.service\nsddm.service\n")
+        self.run_target("/preflight", "console", ok=False)
+        self.write("/mock-enabled", "gdm.service\n")
+        self.link(dm, "/custom/gdm.service")
+        self.run_target("/preflight", "console", ok=False)
+        (self.root / dm.lstrip("/")).unlink()
+        self.assertIn("LEGACY=1", self.run_target("/preflight", "console").stdout)
+        self.write("/mock-enabled", "")
+        self.assertIn("LEGACY=0", self.run_target("/preflight", "console").stdout)
+
     def test_installer_missing_component_after_package_success(self):
         (self.root / "usr/bin/Xorg").unlink()
         result = self.run_target("/install-xfce.sh", user=True, ok=False)
