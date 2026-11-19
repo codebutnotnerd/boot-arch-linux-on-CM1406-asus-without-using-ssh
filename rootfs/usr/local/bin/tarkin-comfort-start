@@ -1,0 +1,25 @@
+#!/bin/bash
+set -euo pipefail
+[[ -n "${XDG_RUNTIME_DIR:-}" && -n "${WAYLAND_DISPLAY:-}" ]] || {
+  echo "tarkin-comfort-start: run inside Hyprland; WAYLAND_DISPLAY/XDG_RUNTIME_DIR are missing." >&2
+  exit 1
+}
+exec 9>"$XDG_RUNTIME_DIR/tarkin-comfort.flock"
+flock -n 9 || exit 0
+cfg="${XDG_CONFIG_HOME:-$HOME/.config}"
+if command -v blueman-applet >/dev/null 2>&1 && ! pgrep -u "$(id -u)" -x blueman-applet >/dev/null; then
+  blueman-applet 9>&- &
+fi
+if ! command -v hypridle >/dev/null 2>&1; then
+  echo "tarkin-comfort-start: install hypridle: sudo pacman -S --needed hypridle" >&2
+  exit 1
+fi
+if pgrep -u "$(id -u)" -x hypridle >/dev/null; then
+  echo "tarkin-comfort-start: an existing hypridle is running; keeping it." >&2
+  exit 0
+fi
+[[ -f "$cfg/hypr/hypridle.conf" ]] || {
+  echo "tarkin-comfort-start: missing $cfg/hypr/hypridle.conf; rerun install-hyprland.sh --config-only." >&2
+  exit 1
+}
+exec hypridle -c "$cfg/hypr/hypridle.conf"

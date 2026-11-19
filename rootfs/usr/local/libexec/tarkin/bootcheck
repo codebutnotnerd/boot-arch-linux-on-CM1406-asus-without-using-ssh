@@ -1,11 +1,4 @@
 #!/bin/bash
-# Boot check (v1.50), run as root by tarkin-bootcheck.service. Only reads; writes warnings to the journal
-# and to /run/tarkin/boot-warnings (shown in new terminals). It never changes the partition table.
-#
-# The firmware substitutes %U in the kernel command line (root=PARTUUID=%U/PARTNROFF=1) with the unique
-# GUID of the kernel partition it booted, so /proc/cmdline names the stick's kernel partition. Its GPT
-# attribute bits (ChromeOS layout: priority 48-51, tries 52-55, successful 56) decide whether the firmware
-# keeps booting it: with successful=0 every boot uses up one "try", and at 0 tries the stick stops booting.
 set -u
 out=/run/tarkin/boot-warnings
 mkdir -p /run/tarkin
@@ -38,8 +31,6 @@ if [[ "$scheme" != gpt ]]; then
   echo "kernel partition $kdev: GPT attributes not readable (scheme '${scheme:-none}'); nothing to check."
   exit 0
 fi
-# The system booted from this partition, so all-zero attributes cannot be what the firmware saw; a missing
-# value only means blkid did not report it. Never warn on a guess.
 if [[ ! "$flags" =~ ^0x[0-9a-fA-F]+$ ]]; then
   echo "kernel partition $kdev: blkid reports no GPT attributes; nothing to check."
   exit 0

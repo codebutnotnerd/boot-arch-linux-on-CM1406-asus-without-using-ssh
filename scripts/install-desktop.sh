@@ -41,8 +41,6 @@ run_worker() {
   echo 8388608 > /proc/sys/vm/dirty_background_bytes || true
   echo 33554432 > /proc/sys/vm/dirty_bytes || true
   (
-    # set -e is ignored inside a subshell tested by "||": stop explicitly on a failed upgrade,
-    # otherwise the -S below would run against new databases on a half-upgraded system.
     set -e
     pacman -Syu --noconfirm --noprogressbar --ignore linux-aarch64,linux-aarch64-headers || exit $?
     for p in "${PKGS[@]}"; do
@@ -78,7 +76,7 @@ put() {
 
 if (( ! CONFIGS_ONLY && ! SESSION_ONLY )); then
   command -v pacman >/dev/null || die "pacman not found: this must run inside the Arch system."
-  sudo -v || die "sudo needs your password (the one chosen during the install; sticks made before v1.50: alarm unless you changed it)."
+  sudo -v || die "sudo needs your password (the one chosen during the install; older sticks whose installer never asked for one: alarm unless you changed it)."
   getent hosts mirror.archlinuxarm.org >/dev/null || die "No network (cannot resolve mirror.archlinuxarm.org). Connect first: sudo tarkin-wifi \"NetworkName\"."
 
   free_kb="$(df -Pk / | awk 'NR==2 {print $4}')"
@@ -130,6 +128,13 @@ if (( ! CONFIGS_ONLY )); then
   cat > "$tmp/console" <<'TARKIN_CONSOLE_EOF'
 #!/bin/bash
 set -u
+if [[ -e /etc/systemd/system/display-manager.service || -L /etc/systemd/system/display-manager.service ]] ||
+   [[ "$(cat /etc/tarkin/display-owner 2>/dev/null)" == xfce ]] ||
+   systemctl is-active --quiet gdm.service sddm.service 2>/dev/null ||
+   systemctl is-enabled --quiet gdm.service sddm.service 2>/dev/null; then
+  echo "A display manager owns or reserves the display. Use sudo tarkin-display terminal (or hyprland), then reboot; do not start another compositor." >&2
+  exit 1
+fi
 cd "$HOME" || exit 1
 uid="$(id -u)"
 export XDG_RUNTIME_DIR="/run/user/$uid"
@@ -141,8 +146,6 @@ if [[ ! -d "$XDG_RUNTIME_DIR" ]]; then
   echo "tarkin-console: $XDG_RUNTIME_DIR missing after ${n}s (user manager not running? check linger)" >&2
   exit 1
 fi
-# This is a *system* service, not a logind session: export the user D-Bus so
-# GTK/portal apps started from the terminal or the desktop can reach it.
 export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
 export LIBSEAT_BACKEND=seatd SEATD_VTBOUND=0
 export LANG=C.UTF-8
@@ -155,15 +158,26 @@ for c in /sys/class/drm/card[0-9]; do
 done
 unset WAYLAND_DISPLAY DISPLAY
 [[ -f /etc/tarkin/console.env ]] && . /etc/tarkin/console.env
+widevine_gmp_path() {
+  local line value="" count=0 real re='^MOZ_GMP_PATH="(/opt/WidevineCdm/[A-Za-z0-9._/-]+)"$'
+  [[ -f /etc/environment && ! -L /etc/environment && "$(stat -c %u -- /etc/environment)" == 0 ]] || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?MOZ_GMP_PATH[[:space:]]*= ]] || continue
+    count=$((count + 1))
+    [[ "$line" =~ $re ]] && value="${BASH_REMATCH[1]}"
+  done < /etc/environment
+  [[ $count == 1 && -n "$value" && "$value" != *..* ]] || return 1
+  real="$(readlink -e -- "$value")" || return 1
+  [[ -d "$real" && -f "$real/manifest.json" && -f "$real/libwidevinecdm.so" ]] || return 1
+  [[ "$(stat -c '%u %A' -- "$real")" =~ ^0\ d....-..-.$ ]] || return 1
+  printf '%s\n' "$value"
+}
+if gmp="$(widevine_gmp_path)"; then export MOZ_GMP_PATH="$gmp"; fi
 export XKB_DEFAULT_LAYOUT="${XKB_DEFAULT_LAYOUT:-us}"
 export AQ_DRM_DEVICES="$card" XDG_SESSION_TYPE=wayland
 session="${TARKIN_SESSION:-terminal}"
 echo "tarkin-console: display $card, keyboard layout $XKB_DEFAULT_LAYOUT, session $session"
 
-# The on-screen terminal (cage + foot) is wlroots. There is no working EGL for
-# this display, so letting wlroots probe GLES2 stalls or fails (long black
-# screen, restart loop). Pin it like the earlier working release did: pixman
-# renderer, software cursor, MediaTek display node. Hyprland unsets WLR_RENDERER.
 run_terminal() {
   unset LD_PRELOAD LD_LIBRARY_PATH LIBGL_ALWAYS_SOFTWARE GALLIUM_DRIVER MESA_LOADER_DRIVER_OVERRIDE WLR_RENDERER_ALLOW_SOFTWARE AQ_NO_MODIFIERS
   export WLR_RENDERER=pixman WLR_NO_HARDWARE_CURSORS=1 WLR_DRM_DEVICES="$card"
@@ -260,28 +274,18 @@ TARKIN_CONSOLE_EOF
 set -euo pipefail
 case "${1:-}" in desktop|terminal) ;; *) echo "Usage: sudo tarkin-session desktop|terminal" >&2; exit 1 ;; esac
 [[ $EUID -eq 0 ]] || { echo "Run it with sudo." >&2; exit 1; }
-if systemctl is-active --quiet gdm.service 2>/dev/null; then
-  echo "GDM owns the display (install-hyprland.sh): pick the session with the gear in GDM." >&2
-  echo "To use the on-screen console instead: sudo systemctl disable --now gdm && sudo systemctl enable --now tarkin-console" >&2
-  exit 1
+if [[ -x /usr/local/bin/tarkin-display ]]; then
+  case "$1" in desktop) exec /usr/local/bin/tarkin-display hyprland ;; terminal) exec /usr/local/bin/tarkin-display terminal ;; esac
 fi
-f=/etc/tarkin/console.env
-mkdir -p /etc/tarkin
-touch "$f"
-if grep -q '^TARKIN_SESSION=' "$f"; then
-  sed -i "s/^TARKIN_SESSION=.*/TARKIN_SESSION=$1/" "$f"
-else
-  echo "TARKIN_SESSION=$1" >> "$f"
-fi
-echo "Session set to: $1. Restarting the display now (this window will close)..."
-systemctl --no-block restart tarkin-console.service
+echo "tarkin-display is missing. Reinstall the v1.40 rootfs tools before changing display ownership." >&2
+exit 1
 TARKIN_SESSION_EOF
   sudo install -D -m 755 "$tmp/console" /usr/local/libexec/tarkin/console
   sudo install -D -m 755 "$tmp/tarkin-session" /usr/local/bin/tarkin-session
 fi
 
 if (( SESSION_ONLY )); then
-  echo "[+] Session files updated. Now: sudo tarkin-session desktop"
+  echo "[+] Session files updated. For the next boot: sudo tarkin-session desktop, then reboot"
   exit 0
 fi
 
@@ -580,10 +584,10 @@ echo
 if (( CONFIGS_ONLY )); then
   echo "[+] Configuration written. Nothing else was changed."
 else
-  echo "[+] Desktop installed. To start it on the built-in display, now and at every boot:"
-  echo "      sudo tarkin-session desktop"
-  echo "    The screen restarts in a few seconds. Keys: Super+d start menu, Super+Enter terminal,"
-  echo "    Super+e files, Super+q close window, Super+f fullscreen, Super+Shift+e quit. Back to the terminal: sudo tarkin-session terminal"
+  echo "[+] Desktop installed. To start it on the built-in display from the next boot on:"
+  echo "      sudo tarkin-session desktop && sudo reboot"
+  echo "    Keys: Super+d start menu, Super+Enter terminal,"
+  echo "    Super+e files, Super+q close window, Super+f fullscreen, Super+Shift+e quit. Back to the terminal (next boot): sudo tarkin-session terminal"
   echo "    (the start button on the taskbar also opens the menu; run 'foot' from it for a terminal)."
   echo "    Hyprland starts with software rendering. For the Mali-G57 GPU also run:"
   echo "      bash ~/install-hyprland.sh"

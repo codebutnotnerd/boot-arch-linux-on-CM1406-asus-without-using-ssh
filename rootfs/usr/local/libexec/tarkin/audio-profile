@@ -1,20 +1,4 @@
 #!/bin/bash
-# tarkin-audio (v1.50): built-in sound of the CM1406 (ALSA card mt8189_rt5650), run by the user unit
-# tarkin-audio.service once PipeWire is up.
-#
-#   audio-profile              set up the card, then follow the headset jack (stays running)
-#   audio-profile route H M    speakers (H=0) or headphones (H=1); internal mic (M=0) or headset mic (M=1)
-#   audio-profile route auto   same, from the current jack state
-#   audio-profile save         remember the volume of the speaker and headphone sinks
-#   audio-profile info         print what the script detects (card, UCM, sinks); changes nothing
-#
-# Why not the UCM profile in PipeWire: WirePlumber switches ports from jacks only through a UCM JackControl
-# value (an ALSA control name). The ChromeOS profile in /usr/share/alsa/ucm2/mt8189_rt5650/HiFi.conf has
-# none: it only names the jack input device (JackDev "mt8189_rt5650 Headset Jack") and its switch codes
-# (JackSwitch 2 = headphone, 4 = microphone), which only ChromeOS reads. So the card stays in the
-# "pro-audio" profile (one PipeWire node per PCM) and this script switches the UCM devices itself with
-# alsaucm, using only the devices of HiFi.conf; audio-jack watches the jack input device.
-# PCMs (HiFi.conf): Speaker = PCM 0, Headphone = PCM 1, Internal Mic = PCM 2, Mic (headset) = PCM 3.
 set -u
 
 CONF=/etc/tarkin/audio.conf
@@ -25,8 +9,8 @@ TARKIN_JACK_SWITCH=1
 # shellcheck disable=SC1090
 [[ -r "$CONF" ]] && . "$CONF"
 
-ALSA_ID=mt8189rt5650        # card id, as in the cdev "hw:mt8189rt5650" lines of HiFi.conf
-ALSA_NAME=mt8189_rt5650     # card name (directory of the UCM profile)
+ALSA_ID=mt8189rt5650
+ALSA_NAME=mt8189_rt5650
 PCM_SPEAKER=0; PCM_HEADPHONE=1; PCM_INTMIC=2; PCM_HSMIC=3
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/tarkin"
 VOL_FILE="$STATE_DIR/audio-volumes"
@@ -36,7 +20,6 @@ JACK="$(dirname "$SELF")/audio-jack"
 
 log() { echo "tarkin-audio: $*" >&2; }
 
-# ALSA card index of the built-in card, from its id (or its name in /proc/asound/cards).
 card_index() {
   local f
   for f in /proc/asound/card[0-9]*/id; do
@@ -50,7 +33,6 @@ card_index() {
   awk -v n="$ALSA_NAME" '$1 ~ /^[0-9]+$/ && index($0, n) { print $1; found = 1; exit } END { exit !found }' /proc/asound/cards 2>/dev/null
 }
 
-# PipeWire card whose alsa.card property is the ALSA index (e.g. alsa_card.platform-soc_sound).
 pw_card() {
   pactl list cards 2>/dev/null | awk -v idx="$1" '
     /^[[:space:]]*Name: / { name = $2 }
@@ -58,13 +40,12 @@ pw_card() {
 }
 
 pw_names() { pactl list "short" "$1" 2>/dev/null | awk '{ print $2 }'; }
-has_node() { # has_node sinks|sources NAME
+has_node() {
   local all
   all="$(pw_names "$1")"
   [[ $'\n'"$all"$'\n' == *$'\n'"$2"$'\n'* ]]
 }
 
-# UCM card argument alsaucm accepts for this card: the card name, else hw:<index>.
 ucm_card() {
   local c
   for c in "$ALSA_NAME" "hw:$1"; do
@@ -111,7 +92,7 @@ save_volumes() {
   mv -f "$tmp" "$VOL_FILE"
 }
 
-restore_volume() { # restore_volume SINK DEFAULT_PERCENT
+restore_volume() {
   local saved n
   has_node sinks "$1" || return 0
   saved="$(awk -v s="$1" '$1 == s { v = $2 } END { print v }' "$VOL_FILE" 2>/dev/null)"
@@ -126,29 +107,47 @@ restore_volume() { # restore_volume SINK DEFAULT_PERCENT
   pactl set-sink-volume "$1" "$n%" || log "could not set the volume of $1."
 }
 
-route() { # route HP MIC
+select_local_sink() {
+  local current
+  current="$(pactl get-default-sink)" || {
+    log "cannot read default sink; keeping the current selection."
+    return 1
+  }
+  case "$current" in
+    bluez_output.*) log "Bluetooth is selected; keeping $current."; return 0 ;;
+  esac
+  pactl set-default-sink "$1" || { log "could not select $1."; return 1; }
+}
+
+route() {
   local hp="$1" mic="$2"
   exec 9>"$LOCK"
   flock -w 10 9 || log "another route change is running; going on."
   if [[ "$hp" == 1 ]] && has_node sinks "$SINK_HP"; then
-    log "headphones: speakers off, headphone route on, default sink $SINK_HP."
+    log "headphones: speakers off, headphone route on, local sink candidate $SINK_HP."
     ucm set _verb HiFi set _enadev Speaker set _disdev Speaker set _enadev Headphone
-    pactl set-default-sink "$SINK_HP" || log "could not select $SINK_HP."
+    select_local_sink "$SINK_HP" || { flock -u 9; return 1; }
   else
     [[ "$hp" == 1 ]] && log "headphones plugged in, but PipeWire has no $SINK_HP node: the speakers stay on."
-    log "speakers: headphone route off, speaker route on, default sink $SINK_SPK."
+    log "speakers: headphone route off, speaker route on, local sink candidate $SINK_SPK."
     ucm set _verb HiFi set _enadev Headphone set _disdev Headphone set _enadev Speaker
-    pactl set-default-sink "$SINK_SPK" || log "could not select $SINK_SPK."
+    select_local_sink "$SINK_SPK" || { flock -u 9; return 1; }
   fi
-  if [[ "$mic" == 1 ]] && has_node sources "$SRC_HS"; then
-    pactl set-default-source "$SRC_HS" && log "microphone: headset ($SRC_HS)."
+  local current_source
+  current_source="$(pactl get-default-source)" || { log "cannot read default source; keeping the current selection."; flock -u 9; return 1; }
+  if [[ "$current_source" == bluez_input.* ]]; then
+    log "Bluetooth microphone is selected; keeping $current_source."
+  elif [[ "$mic" == 1 ]] && has_node sources "$SRC_HS"; then
+    pactl set-default-source "$SRC_HS" || { log "could not select $SRC_HS."; flock -u 9; return 1; }
+    log "microphone: headset ($SRC_HS)."
   elif has_node sources "$SRC_INT"; then
-    pactl set-default-source "$SRC_INT" && log "microphone: built-in ($SRC_INT)."
+    pactl set-default-source "$SRC_INT" || { log "could not select $SRC_INT."; flock -u 9; return 1; }
+    log "microphone: built-in ($SRC_INT)."
   fi
   flock -u 9
 }
 
-jack_state() { # prints "HP MIC" (0 0 when unknown)
+jack_state() {
   local out hp=0 mic=0
   if command -v python3 >/dev/null 2>&1 && out="$(python3 "$JACK" --status 2>/dev/null)"; then
     [[ "$out" =~ headphone=([01]) ]] && hp="${BASH_REMATCH[1]}"
@@ -157,7 +156,7 @@ jack_state() { # prints "HP MIC" (0 0 when unknown)
   echo "$hp $mic"
 }
 
-wait_for() { # wait_for SECONDS COMMAND...
+wait_for() {
   local n="$1"; shift
   local i
   for ((i = 0; i < n; i++)); do
@@ -200,10 +199,7 @@ main_setup() {
   fi
 
   wait_for 30 pactl set-card-profile "$PW_CARD" pro-audio || log "could not select the pro-audio profile of $PW_CARD."
-  # Capture paths of both microphones (they use separate PCMs, so both can stay on).
   ucm set _verb HiFi set _enadev "Internal Mic" set _enadev Mic || true
-  # Hardware speaker gain, as in v1.39.3 (README: do not go above about 22 without the ChromeOS DSP).
-  # This control is not part of HiFi.conf, so it is only set when the card really has it.
   hw="name='Speaker Playback Volume'"
   if amixer -q -c "$IDX" cget "$hw" >/dev/null 2>&1; then
     amixer -q -c "$IDX" cset "$hw" 22,22 || log "could not set Speaker Playback Volume."
@@ -224,7 +220,6 @@ main_setup() {
   read -r hp mic < <(jack_state)
   [[ "$TARKIN_JACK_SWITCH" == 1 ]] && log "jack switching unavailable (python3 missing or no '$ALSA_NAME Headset Jack' input device)."
   route "$hp" "$mic"
-  # Stay running so that "save" (ExecStop) keeps the volumes at shutdown.
   exec sleep infinity
 }
 

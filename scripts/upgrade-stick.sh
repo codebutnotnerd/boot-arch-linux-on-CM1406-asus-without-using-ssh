@@ -23,18 +23,28 @@ sysctl -w vm.dirty_background_bytes=8388608 >/dev/null 2>&1 || true
 sysctl -w vm.dirty_bytes=33554432 >/dev/null 2>&1 || true
 sysctl kernel.hung_task_panic vm.dirty_bytes vm.dirty_background_bytes 2>/dev/null || true
 
+here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+updater=""
+for candidate in /usr/local/bin/tarkin-update "$here/../rootfs/usr/local/bin/tarkin-update"; do
+  if [[ -f "$candidate" ]]; then updater="$candidate"; break; fi
+done
+
 cat <<'WARN'
 [i] Two rules for this stick:
     - the kernel packages of Arch Linux ARM are NOT used here; the real kernel
-      is the signed ChromeOS kernel on /dev/sdX1. They are ignored below.
-    - one display owner at a time. Since v1.39 install-hyprland.sh leaves GDM
-      disabled and tarkin-console enabled (Hyprland starts by itself); with
-      --with-gdm it is the other way round. Enabling both on the same boot
-      gives a black screen. Check with: systemctl is-enabled gdm tarkin-console
+      is the signed ChromeOS kernel on /dev/sdX1. They are kept back below.
+    - one display owner at a time. Change it only with sudo tarkin-display
+      hyprland|xfce|terminal (v1.40, takes effect at the next boot). Never
+      enable two display managers or a display manager plus tarkin-console.
 WARN
 
-info "Upgrading (this can take 20-60 minutes on USB; slow is fine, a panic is not)..."
-pacman -Syu --noconfirm --ignore linux-aarch64,linux-aarch64-headers
+if [[ -n "$updater" ]]; then
+  info "Upgrading with $updater (20-60 minutes on USB; review the transaction before answering)..."
+  bash "$updater"
+else
+  info "tarkin-update not found (stick made before v1.40): legacy upgrade (20-60 minutes on USB)..."
+  pacman -Syu --noconfirm --ignore linux-aarch64,linux-aarch64-headers
+fi
 
 info "Flushing..."
 sync

@@ -1,13 +1,4 @@
 #!/bin/bash
-# Tarkin first boot (v1.50), started as root by tarkin-firstboot.service while
-# /var/lib/tarkin/firstboot.pending exists (written by the USB installer).
-#
-# It waits for the network, then runs ~alarm/install-hyprland.sh AS THE USER alarm (runuser, never as root:
-# that script refuses root) to install Hyprland, the Mali GPU stack and the PipeWire sound stack. That
-# script calls sudo itself; for the duration of the run only, a temporary sudo rule lets alarm do so without
-# a password (removed on exit, by ExecStopPost and by tmpfiles at the next boot). On success it disables
-# itself and restarts the machine once into Hyprland. On failure the next boot tries again (3 boots at most).
-# Log: /var/log/tarkin-firstboot.log
 set -u
 PENDING=/var/lib/tarkin/firstboot.pending
 FAILED=/var/lib/tarkin/firstboot.failed
@@ -19,7 +10,6 @@ CONF=/etc/tarkin/firstboot.conf
 USER_NAME=alarm
 MAX_ATTEMPTS=3
 
-# Optional settings: FIRSTBOOT_ARGS="--with-gdm" (extra install-hyprland.sh options), FIRSTBOOT_REBOOT=0.
 FIRSTBOOT_ARGS=""
 FIRSTBOOT_REBOOT=1
 # shellcheck disable=SC1090
@@ -41,7 +31,6 @@ script="$home/install-hyprland.sh"
 
 log "Hyprland + Mali GPU + sound for $USER_NAME: starting."
 
-# 1. Network. Nothing can be installed without it, so wait as long as it takes.
 waited=0
 until getent hosts mirror.archlinuxarm.org >/dev/null 2>&1; do
   if (( waited % 120 == 0 )); then
@@ -58,14 +47,12 @@ if [[ ! -f "$PENDING" ]]; then
   exit 0
 fi
 
-# Only runs that got the network count as attempts (a boot without Wi-Fi must not use one up).
 n="$(cat "$ATTEMPTS" 2>/dev/null || echo 0)"
 [[ "$n" =~ ^[0-9]+$ ]] || n=0
 n=$((n + 1))
 echo "$n" > "$ATTEMPTS"
 log "attempt $n of $MAX_ATTEMPTS."
 
-# 2. The user manager of alarm (linger) provides /run/user/<uid> and the user D-Bus PipeWire needs.
 for i in $(seq 1 120); do
   [[ -S "/run/user/$uid/bus" ]] && break
   if (( i == 30 )); then systemctl start "user@$uid.service" 2>/dev/null; fi
@@ -73,13 +60,11 @@ for i in $(seq 1 120); do
 done
 [[ -S "/run/user/$uid/bus" ]] || log "warning: /run/user/$uid/bus is missing; the sound services may only be enabled at the next boot."
 
-# 3. A stale pacman lock from an interrupted earlier attempt.
 if [[ -e /var/lib/pacman/db.lck ]] && ! pgrep -x pacman >/dev/null 2>&1; then
   log "removing a stale pacman lock."
   rm -f /var/lib/pacman/db.lck
 fi
 
-# 4. Temporary sudo rule. verifypw=any lets "sudo -v" pass although the wheel rule asks for a password.
 remove_sudo_rule
 ( umask 077
   printf 'Defaults:%s verifypw=any\n%s ALL=(ALL:ALL) NOPASSWD: ALL\n' "$USER_NAME" "$USER_NAME" > "$SUDOERS.tmp" )
@@ -90,7 +75,6 @@ if ! visudo -cf "$SUDOERS.tmp" >/dev/null 2>&1; then
 fi
 mv -f "$SUDOERS.tmp" "$SUDOERS"
 
-# 5. The install itself, as alarm, with a clean login-like environment.
 read -r -a extra <<< "$FIRSTBOOT_ARGS"
 log "running: $script ${extra[*]:-} (as $USER_NAME)"
 cd "$home" || exit 1

@@ -84,9 +84,6 @@ in_chroot() {
   ' _ "$MNT" "$@"
 }
 
-# ---- Progress state (v1.50): a rerun resumes where an interrupted run stopped ----
-# $STATE holds KEY=value lines. Keys: STICK_PARTUUID (unique GUID of the stick's partition 2, set when the
-# partition table is written), KEYMAP, ROOTFS_URL, ROOTFS_MD5, SIG_OK_MD5, MODULES_KVER and STEP_<name>=done.
 state_get() {
   [[ -f "$STATE" ]] || return 0
   awk -v k="$1" 'index($0, k "=") == 1 { v = substr($0, length(k) + 2) } END { if (v != "") print v }' "$STATE"
@@ -115,7 +112,6 @@ state_del() {
 step_done() { [[ "$(state_get "STEP_$1")" == "done" ]]; }
 mark_done() { state_set "STEP_$1" "done"; echo "   [step '$1' recorded as done]"; }
 STICK_STEPS=(STEP_partition STEP_extract STEP_packages STEP_password STEP_wifi STEP_complete MODULES_KVER STICK_PARTUUID KEYMAP)
-# Steps that live on the root filesystem: a new mkfs invalidates them.
 FS_STEPS=(STEP_extract STEP_packages STEP_password STEP_wifi STEP_complete MODULES_KVER)
 
 cleanup() {
@@ -229,7 +225,6 @@ KVER="$(uname -r)"
 
 part1="$(tarkin_part "$DEV" 1)"; part2="$(tarkin_part "$DEV" 2)"
 
-# ---- Resume or fresh start ----
 saved_uuid="$(state_get STICK_PARTUUID | tr '[:upper:]' '[:lower:]')"
 cur_uuid="$(cgpt show -i 2 -u "$DEV" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
 if (( RESUME )); then
@@ -259,12 +254,9 @@ if (( RESUMING )); then
   [[ "$(state_get MODULES_KVER)" == "$KVER" ]] && echo "     - kernel modules and firmware ($KVER)"
 fi
 
-# ---- Rootfs: local file, cached download, or download (resumable) ----
 ALARM_KEY_FPR=68B3537F39A313B3E574D06777193F152BDBE6A6
 ALARM_KEYSERVERS=(hkps://keyserver.ubuntu.com hkps://keys.openpgp.org)
 
-# Returns 0 when the signature verifies, 1 when it does NOT verify (bad signature),
-# 2 when it cannot be checked at all (no gpg, empty .sig, or the key could not be fetched).
 verify_signature() {
   local file="$1" sig="$2" gh ks status
   command -v gpg >/dev/null 2>&1 || return 2
@@ -283,8 +275,6 @@ verify_signature() {
 md5_expected() { awk 'NR == 1 { print tolower($1) }' "$1" 2>/dev/null; }
 md5_of()       { md5sum "$1" | awk '{ print $1 }'; }
 
-# Downloads $1 to $2, continuing a partial file (curl -C -). Tries up to 4 times while the file keeps
-# growing. Returns non-zero when the file could not be completed.
 fetch_resumable() {
   local url="$1" out="$2" try before after rc
   for try in 1 2 3 4; do
@@ -298,8 +288,6 @@ fetch_resumable() {
     fi
     (( rc == 0 )) && return 0
     after="$(stat -c %s "$out" 2>/dev/null || echo 0)"
-    # 33/36: the server ignores ranges; 22 without progress on a partial file: usually 416 (the partial file
-    # is not a prefix of what the server has now). Either way, start this file from zero.
     if (( rc == 33 || rc == 36 || (rc == 22 && before > 0 && after == before) )); then
       echo "   [!] the server cannot continue this partial download (curl $rc); starting this file again."
       rm -f "$out"
@@ -339,7 +327,6 @@ get_rootfs() {
   else
     mirrors=("${ALARM_MIRRORS[@]}")
   fi
-  # A partial or complete download from a mirror that is not in this run's list is useless.
   if [[ -n "$saved_url" ]] && ! printf '%s\n' "${mirrors[@]}" | grep -qxF -- "$saved_url"; then
     if (( DRY_RUN )); then
       echo "   [dry-run] would delete the earlier download from $saved_url (not in this run's mirror list)"
@@ -349,16 +336,12 @@ get_rootfs() {
     fi
     saved_url=""
   fi
-  # v1.50.1: a download that came over plain http without a verified signature is refused further down
-  # (unless ALLOW_INSECURE_HTTP=1). Reusing or continuing it would refuse it again on every run, so this
-  # run tries the mirrors in their normal order again (https first).
   local http_unverified=0
   if [[ "$saved_url" == http://* && "${ALLOW_INSECURE_HTTP:-0}" != 1 ]] \
      && [[ -z "$(state_get SIG_OK_MD5)" || "$(state_get SIG_OK_MD5)" != "$(state_get ROOTFS_MD5)" ]]; then
     http_unverified=1
     echo "[i] The earlier download came over plain http without a verified signature; trying the https mirrors first."
   fi
-  # 1. A complete download from an earlier run: no network needed.
   if (( ! http_unverified )) && [[ -n "$saved_url" && -s "$ARCHIVE" && -s "$ARCHIVE.md5" && "$(state_get ROOTFS_MD5)" == "$(md5_expected "$ARCHIVE.md5")" ]]; then
     echo "== Checking the rootfs downloaded by an earlier run ($ARCHIVE)..."
     if [[ "$(md5_of "$ARCHIVE")" == "$(md5_expected "$ARCHIVE.md5")" ]]; then
@@ -389,7 +372,6 @@ get_rootfs() {
   avail_kb="$(df -Pk "$DL_DIR" | awk 'NR==2 {print $4}')"
   (( avail_kb >= 1258291 )) || [[ -s "$ARCHIVE" ]] \
     || die "Only $((avail_kb / 1024)) MiB free in $DL_DIR; the rootfs download needs about 1.2 GiB."
-  # Continue a partial file from the same mirror first.
   if [[ -n "$saved_url" ]] && (( ! http_unverified )); then
     mirrors=("$saved_url" "${mirrors[@]}")
   fi
@@ -406,8 +388,6 @@ get_rootfs() {
     fi
     want="$(md5_expected "$ARCHIVE.md5.new")"
     [[ "$want" =~ ^[0-9a-f]{32}$ ]] || { rm -f "$ARCHIVE.md5.new"; echo "   [!] invalid .md5 file; next mirror."; continue; }
-    # v1.50.1: a partial download from another mirror is only given up once this mirror answers (before, a
-    # network cut threw it away while the loop ran through the unreachable mirrors).
     if [[ "$u" != "$(state_get ROOTFS_URL)" ]]; then
       rm -f "$ARCHIVE" "$ARCHIVE.md5" "$ARCHIVE.sig"
       state_del ROOTFS_MD5 SIG_OK_MD5
@@ -422,7 +402,6 @@ get_rootfs() {
     fi
     got="$(md5_of "$ARCHIVE")"
     if [[ "$got" != "$want" ]]; then
-      # A partial file from an older "latest" tarball, or a damaged transfer: one clean retry.
       echo "   [!] checksum mismatch; downloading this file again from the start."
       rm -f "$ARCHIVE"
       if ! fetch_resumable "$u" "$ARCHIVE" || [[ "$(md5_of "$ARCHIVE")" != "$want" ]]; then
@@ -441,18 +420,11 @@ get_rootfs() {
   die "Could not download the rootfs from any mirror. Run the same command again to continue, or download $ROOTFS_NAME and its .md5 with the ChromeOS browser into /var/tmp, then re-run (the launcher finds it there)."
 }
 
-# ---- Hidden entries (v1.50.2) ----
-# VT2 keeps every key pressed while the installer is busy (the long download, gpg, the network check),
-# for example a key pressed to wake the screen. A hidden 'read' then got that text glued in front of the
-# first entry, so the two password entries never matched, even when only Enter was pressed.
-# Pending input is now thrown away right before each hidden prompt, and each typed character shows as '*'.
 drain_tty() {
   local junk
   [[ -t 0 ]] || return 0
   while IFS= read -r -s -t 0.2 -n 4096 junk; do :; done 2>/dev/null || true
 }
-# read_hidden "Prompt: " -> HIDDEN_REPLY. Enter ends; Backspace erases one character, Ctrl+U the whole
-# entry; arrow and function keys are ignored. The prompt and the stars go to stderr, like read -p.
 read_hidden() {
   local c rest LC_ALL=C
   HIDDEN_REPLY=""
@@ -468,7 +440,6 @@ read_hidden() {
       $'\x15')
         while [[ -n "$HIDDEN_REPLY" ]]; do HIDDEN_REPLY="${HIDDEN_REPLY%?}"; printf '\b \b' >&2; done ;;
       $'\e')
-        # Swallow the rest of the key's escape sequence (ESC [ ... final byte, or ESC O x).
         rest=""; IFS= read -r -s -t 0.05 -n 1 rest || true
         if [[ "$rest" == "[" || "$rest" == "O" ]]; then
           while IFS= read -r -s -t 0.05 -n 1 rest; do [[ -z "$rest" || "$rest" == [@-~] ]] && break; done || true
@@ -479,8 +450,6 @@ read_hidden() {
   printf '\n' >&2
 }
 
-# ---- Password for alarm (v1.50: mandatory, the image default alarm/alarm is never kept) ----
-# Prints why a password is refused and returns 0; returns 1 when it is acceptable.
 password_problem() {
   local p="$1" lower LC_ALL=C
   if (( ${#p} < PASS_MIN )); then echo "Too short: use at least $PASS_MIN characters."; return 0; fi
@@ -535,11 +504,9 @@ read_password() {
   die "No valid password after $tries tries. Nothing was written to the stick."
 }
 
-# ---- Checks and questions, before anything is written ----
 get_rootfs
 
 (( ROOTFS_READY || DRY_RUN )) || die "Rootfs archive missing: $ARCHIVE"
-# In a dry run the checks below run only on a rootfs that is already complete (local or downloaded earlier).
 if (( ROOTFS_READY )); then
   [[ -f "$ARCHIVE.md5" ]] || die "Missing checksum file: $ARCHIVE.md5"
   expected_md5="$(md5_expected "$ARCHIVE.md5")"
@@ -558,7 +525,6 @@ if (( ROOTFS_READY )); then
         0) SIG_OK=1; echo "== Rootfs signature verified (key $ALARM_KEY_FPR)."
            [[ -z "$ARCHIVE_URL" ]] || (( DRY_RUN )) || state_set SIG_OK_MD5 "$actual_md5" ;;
         1) if [[ -n "$ARCHIVE_URL" ]] && (( ! DRY_RUN )); then
-             # v1.50.1: drop the download, or every rerun would reuse it and stop here again.
              rm -f "$ARCHIVE" "$ARCHIVE.md5" "$ARCHIVE.sig"
              state_del ROOTFS_URL ROOTFS_MD5 SIG_OK_MD5
              die "The signature of the rootfs downloaded from $ARCHIVE_URL does not verify against the Arch Linux ARM Build System key; refusing to erase the USB drive. The download was deleted: running the installer again downloads it again."
@@ -593,7 +559,6 @@ if (( ! SKIP_WIFI )); then
   if [[ -z "$WIFI_SSID" && "${ALLOW_NO_WIFI:-0}" != 1 && -f /var/cache/shill/default.profile ]]; then
     echo "== Reading the saved Wi-Fi network from ChromeOS..."
     prof=/var/cache/shill/default.profile
-    # Name and passphrase are taken from the same [wifi_...] section (the first one that has a Name).
     shill_field() {
       awk -v want="$1" '
         /^\[/ { if (found) exit; sec = ($0 ~ /^\[wifi_/); name = ""; pass = ""; next }
@@ -791,9 +756,10 @@ ALARM_UID="${ALARM_UID:-1000}"; ALARM_GID="${ALARM_GID:-1000}"
 [[ -d "$MNT/home/alarm" ]] || die "The rootfs has no /home/alarm: this is not the Arch Linux ARM aarch64 image."
 install -m 755 "$REPO_ROOT/scripts/install-desktop.sh" "$MNT/home/alarm/install-desktop.sh"
 install -m 755 "$REPO_ROOT/install-hyprland.sh" "$MNT/home/alarm/install-hyprland.sh"
+install -m 755 "$REPO_ROOT/install-xfce.sh" "$MNT/home/alarm/install-xfce.sh"
+install -m 755 "$REPO_ROOT/install-gpuapp.sh" "$MNT/home/alarm/install-gpuapp.sh"
 install -m 755 "$REPO_ROOT/scripts/upgrade-stick.sh" "$MNT/home/alarm/upgrade-stick.sh"
-chown "$ALARM_UID:$ALARM_GID" "$MNT/home/alarm/install-desktop.sh" "$MNT/home/alarm/install-hyprland.sh" "$MNT/home/alarm/upgrade-stick.sh"
-# Terminal notice (first-boot progress, boot warnings): sourced from alarm's ~/.bashrc.
+chown "$ALARM_UID:$ALARM_GID" "$MNT/home/alarm/install-desktop.sh" "$MNT/home/alarm/install-hyprland.sh" "$MNT/home/alarm/upgrade-stick.sh" "$MNT/home/alarm/install-xfce.sh" "$MNT/home/alarm/install-gpuapp.sh"
 BASHRC="$MNT/home/alarm/.bashrc"
 if [[ ! -f "$BASHRC" && -f "$MNT/etc/skel/.bashrc" ]]; then
   cp "$MNT/etc/skel/.bashrc" "$BASHRC"
@@ -852,7 +818,6 @@ if (( ! SKIP_WIFI )) && [[ -n "$WIFI_SSID" ]]; then
       echo "update_config=1"
       [[ -z "${WIFI_COUNTRY:-}" ]] || echo "country=$WIFI_COUNTRY"
       echo "network={"
-      # The SSID is written in hex: any character (quotes included) is then safe for wpa_supplicant.
       echo "  ssid=$(printf '%s' "$WIFI_SSID" | od -An -tx1 -v | tr -d ' \n')"
       echo "  psk=\"$WIFI_PASS\""
       echo "  key_mgmt=WPA-PSK"
@@ -870,7 +835,6 @@ else
   echo "== Installing the terminal (cage, foot, seatd), Wi-Fi tools and sudo in the new rootfs (isolated chroot, needs network)..."
   sync
   mask_hooks
-  # An interrupted earlier run can leave pacman's lock behind; nothing else uses this rootfs.
   rm -f "$MNT/var/lib/pacman/db.lck"
   resolv_saved=0
   if [[ -e "$MNT/etc/resolv.conf" || -L "$MNT/etc/resolv.conf" ]]; then
@@ -904,7 +868,6 @@ done
 [[ -d "$MNT/etc/sudoers.d" ]] || install -d -m 750 "$MNT/etc/sudoers.d"
 echo '%wheel ALL=(ALL:ALL) ALL' > "$MNT/etc/sudoers.d/10-wheel"; chmod 440 "$MNT/etc/sudoers.d/10-wheel"
 
-# sudo is usable for alarm when it is installed, the sudoers files parse, and alarm is in wheel.
 SUDO_OK=0
 alarm_groups=" $(in_chroot id -nG alarm 2>/dev/null || true) "
 if [[ -x "$MNT/usr/bin/sudo" && -x "$MNT/usr/bin/visudo" && "$alarm_groups" == *" wheel "* ]] \
@@ -916,8 +879,6 @@ if (( NEED_PASSWORD )); then
   printf 'alarm:%s\n' "$USER_PASS" | in_chroot chpasswd \
     || die "Could not set the password of alarm on the stick."
   if (( ! SUDO_OK )); then
-    # No working sudo (ALLOW_NO_PKGS or a failed package step): root keeps a password, and it must not
-    # stay the image default 'root'.
     printf 'root:%s\n' "$USER_PASS" | in_chroot chpasswd || die "Could not set the root password on the stick."
     echo "   [!] sudo is not usable on the stick, so root is NOT locked: root now has the same password as alarm."
   fi
@@ -933,8 +894,6 @@ fi
 if (( ! SKIP_WIFI )); then
   mark_done wifi
 fi
-# Store the passphrase as a hashed PSK once wpa_passphrase exists on the stick (also on a resumed run whose
-# first package step had failed): SSID and passphrase are read back from the config written above.
 if [[ -f "$WPA_CONF" && -x "$MNT/usr/bin/wpa_passphrase" ]] && grep -q '^  psk="' "$WPA_CONF"; then
   conf_pass="$(sed -n 's/^  psk="\(.*\)"$/\1/p' "$WPA_CONF" | head -n 1)"
   conf_ssid_hex="$(sed -n 's/^  ssid=\([0-9a-f]*\)$/\1/p' "$WPA_CONF" | head -n 1)"
@@ -972,8 +931,6 @@ if [[ -f "$WPA_CONF" ]]; then
   enable_unit /usr/lib/systemd/system/wpa_supplicant@.service "$WANTS" wpa_supplicant@wlan0.service
 fi
 
-# First boot (v1.50): tarkin-firstboot.service runs install-hyprland.sh as alarm once the network is up
-# (Hyprland, Mali GPU stack, PipeWire sound), then disables itself. See /var/log/tarkin-firstboot.log.
 if (( DESKTOP )) && (( PKG_OK )) && [[ "${ALLOW_NO_PKGS:-0}" != 1 ]]; then
   if [[ ! -f "$MNT/var/lib/tarkin/firstboot.done" ]]; then
     mkdir -p "$MNT/var/lib/tarkin"

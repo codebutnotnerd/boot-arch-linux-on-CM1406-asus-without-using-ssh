@@ -1,31 +1,50 @@
 # Arch Linux ARM on the ASUS Chromebook CM1406
 
-Boot Arch Linux ARM with Hyprland from a USB stick on the ASUS Chromebook CM1406 (`google,tarkin`, MediaTek MT8189).
-ChromeOS stays on the internal storage and is never touched: unplug the stick and the Chromebook boots ChromeOS as before.
+Scripts that put Arch Linux ARM with Hyprland on a USB stick and boot it on an ASUS Chromebook CM1406.
+Everything is done on the Chromebook itself: no SSH, no second computer. ChromeOS stays on the internal
+storage and is not modified; unplug the stick and the Chromebook boots ChromeOS as before.
 
-No SSH and no second computer needed.
+Version 1.40. Details are in [docs/REFERENCE.md](docs/REFERENCE.md), history in [CHANGELOG.md](CHANGELOG.md).
 
-Version 1.50.2. Full details: [docs/REFERENCE.md](docs/REFERENCE.md). History: [CHANGELOG.md](CHANGELOG.md).
+## Hardware
 
-## What works
+Only the ASUS Chromebook CM1406 (board `google,tarkin`, MediaTek MT8189, Mali-G57 GPU). The installer checks
+the board name and stops on anything else.
 
-- USB boot in Developer Mode
-- Built-in screen, keyboard and touchpad
+## Status
+
+Works on my CM1406:
+
+- USB boot in Developer Mode, built-in screen, keyboard and touchpad
 - Wi-Fi and `pacman`
-- Hyprland on the Mali-G57 GPU, started automatically at boot
-- Bluetooth (reported by testers)
+- Hyprland 0.57.2 rendering on the Mali-G57, started at boot without a login screen
+- Speakers
+- Bluetooth audio (one JBL headset; you may have to pick it once in `pavucontrol`)
+- Firefox on the GPU through `gpuapp` (see [Applications on the GPU](#applications-on-the-gpu))
 
-Not tested yet: the automatic first-boot setup, headphone switching, microphones, suspend, touchscreen.
+Limits:
 
-## You need
+- The stick runs the ChromeOS kernel, re-signed with the developer keys, with its own modules. It is never
+  replaced by an Arch kernel, and `tarkin-update` holds the kernel packages back.
+- Only Hyprland uses the GPU. Applications render on the CPU (Mesa llvmpipe) unless you start them with `gpuapp`.
+- No hardware video decoding.
+- No suspend. The idle lock only turns the screen off.
+- XFCE with SDDM is experimental. The SDDM login screen has never been tried on the machine, and the GDM one
+  goes black on the first key press, so GDM is off by default.
+
+Written but not yet tried on the machine: the automatic first-boot setup from start to finish, finding the GPU
+driver on a freshly made stick, the screen lock, `tarkin-update`, headphone jack switching, the microphones.
+The touchscreen and Netflix have not been tried either. The tests in `tests/` run against mocks, not the hardware.
+
+## What you need
 
 - The Chromebook in Developer Mode
-- A USB stick or USB SSD of 8 GB or more (it will be erased)
-- A WPA2 Wi-Fi network (a phone hotspot works)
+- A USB stick or USB SSD, 8 GB or more. It will be erased.
+- A WPA2 Wi-Fi network (a phone hotspot is fine)
 
 ## Install
 
-1. Download this repository as a zip into **Downloads**.
+1. In ChromeOS, download this repository as a zip into Downloads.
 
 2. Open the ChromeOS terminal (`Ctrl+Alt+T`, then type `shell`) and unpack it:
 
@@ -35,99 +54,125 @@ Not tested yet: the automatic first-boot setup, headphone switching, microphones
    ls
    ```
 
-3. Plug in the stick. Open VT2 with `Ctrl+Alt+Refresh` and log in as `chronos`. Then run:
+3. Plug in the stick. Switch to VT2 with `Ctrl+Alt+Refresh`, log in as `chronos`, and run:
 
    ```sh
    cd /var/tmp/<unpacked-folder>
    sudo bash install.sh
    ```
 
-   It downloads Arch Linux ARM, asks you to type the stick's name, writes the stick and asks for a password.
-   If it gets interrupted, run the same command again: it resumes where it stopped.
+   `sudo` only works in VT2, not in the `Ctrl+Alt+T` terminal. The installer downloads the Arch Linux ARM
+   rootfs, shows the stick and makes you type its name before erasing it, then asks for a password for the
+   user `alarm`. If it is interrupted, run the same command again and it resumes.
 
-4. Reboot with the stick plugged in. At the "OS verification is OFF" screen press `Ctrl+U`
-   (or choose "Boot from external disk").
+4. Reboot with the stick plugged in. At the "OS verification is OFF" screen press `Ctrl+U`, or choose
+   "Boot from external disk".
 
-5. The first boot installs Hyprland, the GPU stack and sound by itself (20 to 60 minutes, keep it plugged in).
-   The machine restarts once, then Hyprland starts at every boot.
+5. The first boot installs Hyprland, the GPU stack and sound (20 to 60 minutes, needs Wi-Fi, do not power
+   off). The machine then restarts once and Hyprland starts at every boot. To watch it:
 
-To follow the first-boot setup:
-
-```sh
-tail -f /var/log/tarkin-firstboot.log
-```
+   ```sh
+   tail -f /var/log/tarkin-firstboot.log
+   ```
 
 ### Password
 
-The password for `alarm` must be at least 8 characters. VT2 types as a QWERTY keyboard while the stick uses
-the French layout, so use only these letters: `b c d e f g h i j k l n o p r s t u v x` (upper or lower case).
-They are on the same keys on QWERTY and AZERTY.
+At least 8 characters. VT2 is always QWERTY while the stick defaults to the French layout, so unless you pass
+`--keymap us` the installer only accepts the letters that sit on the same keys on both:
+`b c d e f g h i j k l n o p r s t u v x`, upper or lower case.
 
-### Options
+### Installer options
 
-| Option | What it does |
+| Option | Effect |
 |---|---|
-| `--dry-run` | Checks only, changes nothing |
-| `--fresh` | Starts over instead of resuming |
-| `--keymap us` | Keyboard layout (default `fr`) |
-| `--no-desktop` | Terminal only, no Hyprland |
-| `--wifi-ssid <name>` | Uses another Wi-Fi network |
+| `--dry-run` | Run the checks and print the plan. Nothing is downloaded or written. |
+| `--fresh` | Ignore an interrupted install and start over |
+| `--keymap <layout>` | Keyboard layout on the stick (`fr` by default; `us`, `de`, ...) |
+| `--no-desktop` | Terminal only, no first-boot Hyprland setup |
+| `--wifi-ssid <name>` | Use this Wi-Fi network instead of the one saved in ChromeOS |
 
-Example: `sudo bash install.sh --keymap us`
+Example: `sudo bash install.sh --keymap us`. `sudo bash install.sh --help` lists the rest.
 
-## Keys
+## Using it
 
 | Keys | Action |
 |---|---|
-| `Super+Enter` | Terminal |
-| `Super+d` | App menu |
-| `Super+e` | Files |
-| `Super+q` | Close window |
-| `Super+f` | Fullscreen |
-| `Super+Shift+e` | Quit Hyprland |
+| `Super+Enter` | Terminal (foot) |
+| `Super+D` | Application menu (fuzzel) |
+| `Super+E` | File manager |
+| `Super+Q` | Close the window |
+| `Super+F` | Fullscreen |
+| `Super+L` | Lock. Also locks after 5 minutes idle; the screen turns off 30 seconds later. |
+| `Super+Shift+E` | Quit Hyprland |
 
-## Useful commands
+Commands on the stick, as `alarm`:
 
-On the stick:
-
-| Command | What it does |
+| Command | Effect |
 |---|---|
 | `sudo tarkin-wifi "Name"` | Connect to a Wi-Fi network |
-| `sudo tarkin-diag` | Writes a report to send when something is broken |
-| `tarkin-audio-test` | Tests the speakers, headphones and microphones |
-| `sudo bash ~/upgrade-stick.sh` | Safe system upgrade |
-| `sudo tarkin-session terminal` | Back to the plain terminal |
-| `sudo tarkin-session desktop` | Back to Hyprland |
+| `sudo tarkin-update` | Full `pacman -Syu` that keeps the kernel packages back |
+| `sudo bash ~/upgrade-stick.sh` | The same update with extra protections for slow USB sticks |
+| `tarkin-audio-test` | Step-by-step test of speakers, headphones and microphones |
+| `blueman-manager`, `pavucontrol` | Pair Bluetooth devices, choose the sound output |
+| `sudo tarkin-display hyprland` | Hyprland at the next boot (the default) |
+| `sudo tarkin-display terminal` | A plain terminal (cage + foot) at the next boot |
+| `sudo tarkin-display xfce` | XFCE at the next boot, after `bash ~/install-xfce.sh` (experimental) |
+| `tarkin-firefox-widevine` | Optional Firefox DRM setup, see [docs/FIREFOX-WIDEVINE.md](docs/FIREFOX-WIDEVINE.md) |
 
-In ChromeOS VT2, from the unpacked folder:
+`tarkin-display` never restarts the running screen. Run `sudo reboot` to switch.
 
-| Command | What it does |
+## Applications on the GPU
+
+Optional. `install-gpuapp.sh` installs a launcher, `gpuapp`, that runs one program on the Mali-G57 through
+Mesa Zink and the Vulkan driver inside the ChromeOS `libmali`. It builds ARM's `vulkan-wsi-layer` on the stick
+with a patch from zoan37. Nothing is registered system-wide: a program started without `gpuapp` renders on the
+CPU as before.
+
+Run it as `alarm`, without `sudo`, in a terminal of the Hyprland desktop:
+
+```sh
+bash ~/install-gpuapp.sh
+gpuapp --check            # prints "apps on the GPU: yes (...)" or "no (reason)"
+gpuapp firefox            # close the normal Firefox first
+bash ~/install-gpuapp.sh --remove
+```
+
+There is also a "Firefox (GPU)" menu entry when Firefox is installed.
+
+On the CM1406 the script installed and `gpuapp --check` answered
+`apps on the GPU: yes (zink Vulkan 1.4(Mali-G57 (ARM_PROPRIETARY)))`; Firefox reported WebRender on that
+renderer in `about:support`. I have no benchmark numbers. `--remove` has only been run against mocks.
+
+Wayland programs only. X11 programs fail, Chromium and Electron applications fall back to the CPU, Qt Quick
+applications crash under Zink, and video is still decoded on the CPU.
+
+## When something breaks
+
+On the stick, `sudo tarkin-diag` writes a report to `~/tarkin-diag-<date>.txt`. Wi-Fi names, passwords and MAC
+addresses are masked, but read it before posting it anywhere.
+
+| Problem | What to do |
 |---|---|
-| `sudo bash scripts/check-usb.sh` | Checks the stick and shows why the last boot failed |
-| `sudo bash scripts/repair-boot.sh` | Fixes USB boot after a ChromeOS update |
-
-## Troubleshooting
-
-| Problem | Fix |
-|---|---|
-| `sudo` does not work in the `Ctrl+Alt+T` terminal | Normal, use VT2 |
+| It boots ChromeOS instead of the stick | In VT2: `sudo bash scripts/repair-boot.sh` |
+| Black screen, or stuck on the logo | Boot ChromeOS, then in VT2: `sudo bash scripts/check-usb.sh` |
+| `install.sh` finds no stick | Plug it into another port, without a hub |
+| The first-boot setup failed | `tail -n 40 /var/log/tarkin-firstboot.log`, then `bash ~/install-hyprland.sh` (no `sudo`) |
+| "No usable libmali" during the first boot | Copy a working `libmali.so` to the stick, then `bash ~/install-hyprland.sh --mali-source /path/to/libmali.so` |
+| No internet on the stick | `sudo tarkin-dns --keep`, then `sudo tarkin-diag` |
+| No sound | `tarkin-audio-test` |
+| Black screen after `tarkin-display xfce` | [docs/DISPLAY-RECOVERY.md](docs/DISPLAY-RECOVERY.md), from ChromeOS |
 | Wrong characters in VT2 | VT2 is always QWERTY |
-| It boots ChromeOS instead of the stick | Run `sudo bash scripts/repair-boot.sh` in VT2 |
-| Black screen or stuck on the logo | Boot ChromeOS and run `sudo bash scripts/check-usb.sh` |
-| The first-boot setup failed | Read `tail -n 40 /var/log/tarkin-firstboot.log`, then run `bash ~/install-hyprland.sh` (without `sudo`) |
-| No internet on the stick | Try `sudo tarkin-dns --keep`, then `sudo tarkin-diag` |
-| No sound | Run `tarkin-audio-test` and send a photo of the summary |
-| `install.sh` finds no stick | Replug it in another port, without a hub |
 
-More cases: [docs/REFERENCE.md](docs/REFERENCE.md#when-it-doesnt-work).
+The `scripts/` commands run in ChromeOS VT2 from the unpacked folder. More cases are in
+[docs/REFERENCE.md](docs/REFERENCE.md#when-it-doesnt-work).
 
 ## Safety
 
-- Use a spare stick. The installer refuses the internal disk.
-- Only do this on a Chromebook you own. A school Chromebook may forbid Developer Mode.
-- To undo everything, remove the stick and boot ChromeOS.
+Use a spare stick; the installer refuses the internal disk. Only do this on a Chromebook you own: a managed
+(school or work) Chromebook may not allow Developer Mode. To go back, remove the stick and boot ChromeOS.
 
 ## Credits
 
-Based on [zoan37's Omarchy / Arch Linux ARM Chromebook project](https://github.com/zoan37/lenovo-slim3-chromebook-omarchy).
-MIT license, see [LICENSE](LICENSE).
+Based on zoan37's [lenovo-slim3-chromebook-omarchy](https://github.com/zoan37/lenovo-slim3-chromebook-omarchy):
+the GPU probes, the EGL shim and the `vulkan-wsi-layer` patch come from that project. `vulkan-wsi-layer` is by
+Arm Limited and contributors. MIT license, see [LICENSE](LICENSE).

@@ -1,7 +1,4 @@
 #!/bin/bash
-# Guided installer for the ChromeOS VT2 shell (v1.50). THE command is:  sudo bash install.sh
-# (install.sh at the top of the repository starts this script). It finds the rootfs and the stick,
-# offers to resume an interrupted install, then runs install/install-usb.sh.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$HERE")"
@@ -18,7 +15,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY_RUN=1; PASS+=("$1"); shift ;;
     --fresh)   FRESH=1; shift ;;
-    --resume)  shift ;;   # resuming is offered automatically
+    --resume)  shift ;;
     -h|--help)
       cat <<'USAGE'
 Usage: sudo bash install.sh [options]
@@ -91,7 +88,6 @@ if (( ${#disks[@]} == 0 )); then
   exit 1
 fi
 
-# ---- Resume an interrupted install? ----
 saved_uuid="$(state_get STICK_PARTUUID | tr '[:upper:]' '[:lower:]')"
 if [[ -n "$saved_uuid" && "$(state_get STEP_complete)" != "done" ]] && (( ! FRESH )); then
   resume_dev=""

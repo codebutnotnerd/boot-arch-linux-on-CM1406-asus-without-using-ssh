@@ -41,9 +41,6 @@ if [[ "$running_disk" =~ [0-9]$ ]]; then part_kern="${running_disk}p${kern_num}"
 T="$(mktemp -d /var/tmp/tarkin-cmdline.XXXXXX)"
 trap 'mountpoint -q "$T/root" 2>/dev/null && umount "$T/root"; rm -rf "$T"' EXIT
 
-# This writes the kernel ChromeOS runs NOW. After a ChromeOS update that kernel is newer than the one the
-# stick was made with, and the stick only has the modules of its own kernel: a fully booting mode would then
-# come up without Wi-Fi, sound, etc. (v1.50 check).
 if [[ "$MODE" == --normal || "$MODE" == --debug ]] && [[ "${ALLOW_MODULE_MISMATCH:-0}" != 1 ]]; then
   if [[ "$DEV" =~ [0-9]$ ]]; then P2="${DEV}p2"; else P2="${DEV}2"; fi
   kv="$(uname -r)"

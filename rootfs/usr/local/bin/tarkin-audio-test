@@ -1,9 +1,4 @@
 #!/bin/bash
-# tarkin-audio-test (v1.50): checks the built-in sound step by step and ends with a short summary that fits
-# on one screen (take one photo of it). Run it as alarm, in a terminal, without sudo:
-#   tarkin-audio-test            state + speaker, headphone and microphone tests (asks questions)
-#   tarkin-audio-test --status   state only (no sound, no question); used by sudo tarkin-diag
-# The full output is also saved to ~/tarkin-audio-test-<date>.txt
 set -u
 VERSION="$(cat /etc/tarkin/version 2>/dev/null || echo unknown)"
 AP=/usr/local/libexec/tarkin/audio-profile
@@ -31,13 +26,12 @@ fi
 
 section() { printf '\n==== %s ====\n' "$1"; }
 sh_() { printf '$ %s\n' "$*"; "$@" 2>&1 | head -n 60; }
-yes_no() { # yes_no QUESTION -> prints yes|no|skipped
+yes_no() {
   local a
   read -r -p "$1 [y/n] " a </dev/tty || a=""
   case "$a" in y|Y|o|O|yes|oui) echo yes ;; n|N|no|non) echo no ;; *) echo "no answer" ;; esac
 }
 
-# --- Detection (audio-profile info) ---
 info="$("$AP" info 2>/dev/null)" || info=""
 field() { sed -n "s/^$1=\\([^ ]*\\).*/\\1/p" <<<"$info"; }
 IDX="$(field alsa_index)"; UCM_CARD="$(sed -n 's/.*ucm_card=\([^ ]*\).*/\1/p' <<<"$info")"
@@ -95,14 +89,14 @@ fi
 
 R_SPK="not tested"; R_HP="not tested"; R_HP_SPK="not tested"; R_MIC_INT="not tested"; R_MIC_HS="not tested"
 
-play() { # play SINK
+play() {
   if command -v pw-play >/dev/null 2>&1; then
     timeout 20 pw-play --target "$1" "$WAV"
   else
     timeout 20 paplay --device="$1" "$WAV"
   fi
 }
-peak() { # peak WAVFILE -> "N%"
+peak() {
   python3 - "$1" <<'PY' 2>/dev/null || echo "?"
 import array, sys, wave
 data, width = b"", 2
@@ -112,7 +106,7 @@ try:
     data = w.readframes(w.getnframes())
 except Exception:
     pass
-if not data:  # header not finalised: read the raw samples after the 44-byte header
+if not data:
     data = open(sys.argv[1], "rb").read()[44:]
 if width != 2:
     print("?")
@@ -123,7 +117,7 @@ p = max((abs(x) for x in a), default=0)
 print("%d%%" % round(p * 100 / 32768))
 PY
 }
-mic_test() { # mic_test SOURCE LABEL -> sets MIC_RESULT
+mic_test() {
   local f="$TMP/mic.wav" pk heard
   rm -f "$f"
   echo "Speak (or clap) for 4 seconds after Enter: recording from $1"

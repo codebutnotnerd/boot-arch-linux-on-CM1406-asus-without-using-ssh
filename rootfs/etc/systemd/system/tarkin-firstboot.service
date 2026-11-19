@@ -4,10 +4,8 @@ ConditionPathExists=/var/lib/tarkin/firstboot.pending
 After=network.target systemd-networkd.service systemd-resolved.service wpa_supplicant@wlan0.service systemd-user-sessions.service
 
 [Service]
-# simple, not oneshot: the boot does not wait for this (it waits for the network itself and can take an hour).
 Type=simple
 ExecStart=/usr/local/libexec/tarkin/firstboot
-# The temporary sudo rule must never outlive the run, even if the script is killed.
 ExecStopPost=/usr/bin/rm -f /etc/sudoers.d/99-tarkin-firstboot
 TimeoutStopSec=90
 KillMode=control-group

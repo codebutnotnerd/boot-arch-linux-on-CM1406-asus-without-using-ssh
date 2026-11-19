@@ -59,6 +59,7 @@ sh_() { printf '$ %s\n' "$1"; bash -c "$1" 2>&1 | head -n "${LINES_MAX:-80}"; }
   sh_ 'cat /usr/local/bin/hyprland-mali 2>&1; ls -l /usr/share/wayland-sessions/ 2>&1'
   sh_ 'LD_LIBRARY_PATH=/usr/local/lib/tarkin-gpu/mali/lib timeout 30 /usr/local/lib/tarkin-gpu/bin/mali-probe 3 2>&1 | grep -E "GL_RENDERER|GL_VERSION|dmabuf|FAIL"'
   sh_ 'LD_LIBRARY_PATH=/usr/local/lib/tarkin-gpu/mali/lib LD_PRELOAD=/usr/local/lib/tarkin-gpu/lib/egl-mali-shim.so timeout 30 /usr/local/lib/tarkin-gpu/bin/shim-probe 2>&1 | tail -4'
+  [[ -x /usr/local/bin/gpuapp ]] && sh_ "runuser -u $user -- env HOME=$home XDG_RUNTIME_DIR=/run/user/$uid /usr/local/bin/gpuapp --check"
 
   section "touchpad and input"
   sh_ 'systemctl status tarkin-touchpad --no-pager -n 10'
@@ -86,7 +87,6 @@ sh_() { printf '$ %s\n' "$1"; bash -c "$1" 2>&1 | head -n "${LINES_MAX:-80}"; }
   sh_ "$as_user systemctl --user is-active pipewire wireplumber pipewire-pulse tarkin-audio"
   sh_ "$as_user systemctl --user is-enabled tarkin-audio pipewire.socket pipewire-pulse.socket wireplumber"
   sh_ "$as_user pactl info | head -12"
-  # State only (no sound, no question): card, UCM, every HiFi.conf control, sinks, sources, jack.
   LINES_MAX=150 sh_ "$as_user /usr/local/bin/tarkin-audio-test --status"
   sh_ "journalctl _SYSTEMD_USER_UNIT=tarkin-audio.service -b --no-pager | tail -n 25"
   sh_ 'grep -A4 -i "headset jack" /proc/bus/input/devices'

@@ -10,6 +10,7 @@ Type=simple
 User=alarm
 Group=alarm
 SupplementaryGroups=video input render audio seat
+ExecCondition=/usr/local/libexec/tarkin/display-guard
 ExecStart=/usr/local/libexec/tarkin/console
 Restart=always
 RestartSec=3

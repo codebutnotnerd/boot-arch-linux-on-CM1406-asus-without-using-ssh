@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Headset jack of the CM1406 (v1.50), standard library only.
+"""Headset jack of the CM1406 (v1.40), standard library only.
 
   audio-jack --status            print headphone=0|1 mic=0|1 device=/dev/input/eventN (exit 2: no device)
   audio-jack --watch CMD [ARG..] run "CMD ARG.. HP MIC" now and every time the jack state changes
@@ -17,14 +17,13 @@ import subprocess
 import sys
 import time
 
-JACK_NAME = "mt8189_rt5650 Headset Jack"  # JackDev in HiFi.conf
-SW_HEADPHONE_INSERT = 2                    # JackSwitch of SectionDevice "Headphone"
-SW_MICROPHONE_INSERT = 4                   # JackSwitch of SectionDevice "Mic"
-INPUT_EVENT_SIZE = 24                      # struct input_event on 64-bit Linux (aarch64)
+JACK_NAME = "mt8189_rt5650 Headset Jack"
+SW_HEADPHONE_INSERT = 2
+SW_MICROPHONE_INSERT = 4
+INPUT_EVENT_SIZE = 24
 
 
 def eviocgsw(length):
-    # _IOC(_IOC_READ, 'E', 0x1b, len) from linux/input.h; _IOC_READ is 2 on arm64.
     return (2 << 30) | (length << 16) | (ord("E") << 8) | 0x1B
 
 
@@ -48,7 +47,7 @@ def find_device():
 
 
 def read_state(fd):
-    buf = bytearray(8)  # SW_MAX is 0x10: 3 bytes are enough
+    buf = bytearray(8)
     fcntl.ioctl(fd, eviocgsw(len(buf)), buf, True)
 
     def bit(n):
@@ -103,7 +102,7 @@ def watch(cmd):
             if ev & (select.POLLERR | select.POLLHUP | select.POLLNVAL):
                 log("the jack device went away.")
                 return 1
-        time.sleep(0.3)  # let the plug settle (contacts bounce), then read the final state
+        time.sleep(0.3)
         while True:
             try:
                 data = os.read(fd, INPUT_EVENT_SIZE * 64)

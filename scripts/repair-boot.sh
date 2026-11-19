@@ -1,15 +1,4 @@
 #!/bin/bash
-# repair-boot.sh (v1.50) - ChromeOS side, VT2, as root:  sudo bash scripts/repair-boot.sh [--check] [--yes] [/dev/sdX]
-#
-# After a ChromeOS update, a powerwash or a trip out of Developer Mode, the Chromebook may stop booting the
-# Arch stick. This checks everything the firmware needs to boot it, says what is wrong, and after a
-# confirmation repairs what can be repaired from here:
-#   1. Developer Mode (cannot be turned on from a script: instructions are printed)
-#   2. the USB boot flag (dev_boot_external on newer firmware, dev_boot_usb on older) and
-#      dev_boot_signed_only=0, verified by reading them back
-#   3. the stick: present, partition 1 is a ChromeOS kernel partition, kernel signature verifies,
-#      and its GPT boot attributes (priority 15, tries 1, successful 1; only on the stick, never on the eMMC)
-# It never writes to the internal eMMC, and never rewrites the kernel or the root filesystem of the stick.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib-chromeos.sh
@@ -35,9 +24,9 @@ for c in crossystem cgpt futility rootdev dd; do
   command -v "$c" >/dev/null 2>&1 || { echo "[-] $c is missing: run this in ChromeOS (VT2), not on the stick." >&2; exit 1; }
 done
 
-problems=()   # what is wrong
-fixes=()      # what this script will do (shell words, run with eval-free arrays below)
-manual=()     # what only the user can do
+problems=()
+fixes=()
+manual=()
 ok()   { echo "  [OK]      $*"; }
 bad()  { echo "  [PROBLEM] $*"; problems+=("$*"); }
 info() { echo "  [info]    $*"; }
@@ -143,8 +132,6 @@ if [[ -n "$DEV" ]]; then
   fi
   rm -f "$T1"
 
-  # Kernel modules on the stick vs the running ChromeOS kernel (information only: the stick keeps the
-  # kernel it was made with, together with that kernel's modules, so a ChromeOS update does not break it).
   P2="$(tarkin_part "$DEV" 2)"
   mnt="$(findmnt -rno TARGET -S "$P2" 2>/dev/null | head -n 1)"
   tmpm=""
@@ -204,7 +191,6 @@ for f in "${fixes[@]}"; do
         echo "[-] The firmware flags did not stick (see above)."; rc=1
       fi ;;
     attrs)
-      # Re-check right before writing: only a USB stick with our layout, never the internal disk.
       if tarkin_is_safe_usb_disk "$DEV" && tarkin_is_tarkin_stick "$DEV"; then
         cgpt add -i 1 -P 15 -T 1 -S 1 "$DEV"
         P="$(cgpt show -i 1 -P "$DEV")"; T="$(cgpt show -i 1 -T "$DEV")"; S="$(cgpt show -i 1 -S "$DEV")"

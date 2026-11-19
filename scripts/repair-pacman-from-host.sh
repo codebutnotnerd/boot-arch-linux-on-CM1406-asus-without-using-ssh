@@ -88,7 +88,7 @@ masked=()
 for h in /usr/share/libalpm/hooks/*.hook; do
   b="$(basename "$h")"
   case "$b" in
-    30-systemd-sysusers.hook) ;;  # keep: new packages need their users/groups (tarkin-console needs its groups)
+    30-systemd-sysusers.hook) ;;
     30-systemd-*|90-mkinitcpio-*|60-mkinitcpio-*|71-dracut-*|\
     update-mime-database*|update-desktop-database*|gtk-update-icon-cache*|glib-compile-schemas*)
       ln -sfn /dev/null "/etc/pacman.d/hooks/$b"; masked+=("$b") ;;

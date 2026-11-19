@@ -1,5 +1,3 @@
-# Sourced by ~/.bashrc of alarm (v1.50): shows the first-boot status and boot warnings in each new
-# terminal. Plain sh syntax, no exit, no set -e: it must never break the shell that sources it.
 if [ -f /var/lib/tarkin/firstboot.pending ]; then
   echo "------------------------------------------------------------------------"
   echo " First-boot setup in progress: Hyprland, Mali GPU and sound are being"

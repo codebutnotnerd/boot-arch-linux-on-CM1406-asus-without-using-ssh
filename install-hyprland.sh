@@ -8,7 +8,7 @@ ok()   { echo "[+] $*"; }
 
 usage() {
 cat <<'USAGE_EOF'
-Usage: bash install-hyprland.sh [options]          (boot-arch-linux-on-CM1406 v1.50.2)
+Usage: bash install-hyprland.sh [options]          (boot-arch-linux-on-CM1406 v1.40)
 
 Installs Hyprland and makes it render on the Mali-G57 GPU with the ChromeOS
 libmali and a small EGL shim, instead of falling back to the CPU.
@@ -18,17 +18,21 @@ GNOME stays installed; --with-gdm makes GDM the display manager instead.
 
 Options:
   --dry-run        Show what would be done; change nothing.
-  --config-only    Only write or verify the Hyprland config (no sudo needed).
+  --config-only    Only write or verify the Hyprland config (no sudo needed);
+                   adds Super+L and the idle lock to a config without custom ones.
   --gpu-only       Only install the Mali GPU stack, the launcher and the session
                    (no packages, no config, no display changes).
   --with-gdm       Use GDM as the display manager (login screen, GNOME and
                    Hyprland sessions) instead of the auto-starting console.
                    The GDM greeter is known to go black on the CM1406.
+                   Refused while XFCE/SDDM or another display manager owns
+                   the next boot (sudo tarkin-display hyprland, reboot first).
   --no-packages    Skip the pacman step (packages are assumed to be installed).
   --reset-config   Back up and rewrite ~/.config/hypr/hyprland.lua even when it is valid.
-  --mali-source P  Path to a libmali.so copied from the ChromeOS root partition.
+  --mali-source P  Path to a known working libmali.so copied from ChromeOS.
                    Without it the script looks in /usr/local/lib/tarkin-gpu,
-                   ~/gpu-test and finally the ChromeOS partitions (read-only).
+                   ~/gpu-test and finally ROOT-A/ROOT-B of ChromeOS (read-only,
+                   private mount namespace; ext2/3/4, EROFS, SquashFS).
   --skip-gpu-test  Do not abort when the GPU probe fails.
   --remove         Remove the Hyprland (Mali GPU) session and launcher.
                    GNOME and GDM are kept.
@@ -40,8 +44,11 @@ Environment:
   TARKIN_PREFIX=D  Install everything under D instead of / (staging/testing only;
                    skips pacman and systemctl).
 
-A stick made with the one-command installer (v1.50) runs this script by itself at the
+A stick made with the one-command installer (v1.40) runs this script by itself at the
 first boot (tarkin-firstboot.service, as alarm); run it by hand only to repeat or repair.
+
+It also installs Bluetooth (bluez, blueman, pavucontrol) and the light lock:
+Super+L, lock after 5 min idle, screen off at 5 min 30 s, never suspends.
 
 After installing: reboot; Hyprland (Mali GPU) starts by itself. Sound check: tarkin-audio-test
 With --with-gdm: reboot, then in GDM click the gear and pick "Hyprland (Mali GPU)".
@@ -84,9 +91,6 @@ done
 (( WITH_GDM == 0 || (GPU_ONLY == 0 && CONFIG_ONLY == 0 && REMOVE == 0) )) || die "--with-gdm cannot be combined with --gpu-only, --config-only or --remove."
 
 if [[ $EUID -eq 0 && -z "${TARKIN_PREFIX:-}" ]]; then
-  # Run as root (sudo bash install-hyprland.sh), $HOME is /root: the Hyprland
-  # config would be written for root instead of the user who logs in on GDM,
-  # and Hyprland --verify-config fails as root. The script calls sudo itself.
   echo "[-] Do not run this with sudo. Run it as your user: bash install-hyprland.sh (it asks for the sudo password itself)." >&2
   exit 1
 fi
@@ -111,15 +115,9 @@ CONSOLE_ENV="$PREFIX/etc/tarkin/console.env"
 
 WORK_TMP=""
 MALI_TMP=""
-CHROMEOS_MNT=""
+MALI_SELECTED=""
 
 cleanup() {
-  if [[ -n "$CHROMEOS_MNT" ]] && mountpoint -q "$CHROMEOS_MNT" 2>/dev/null; then
-    umount "$CHROMEOS_MNT" 2>/dev/null || "${SUDO[@]}" umount "$CHROMEOS_MNT" 2>/dev/null || true
-  fi
-  if [[ -n "$CHROMEOS_MNT" ]]; then
-    rmdir "$CHROMEOS_MNT" 2>/dev/null || true
-  fi
   if [[ -n "$MALI_TMP" ]]; then
     rm -rf "$MALI_TMP"
   fi
@@ -159,8 +157,6 @@ check_environment() {
   fi
   if (( ! CONFIG_ONLY && ! REMOVE )); then
     [[ -e /dev/mali0 ]] || die "The Mali kernel driver is missing (/dev/mali0 does not exist). This kernel build has no KBase support."
-    # gcc, binutils, libglvnd and libdrm are installed by the package step; check them now only
-    # when that step will not run (main() checks them again right after it).
     if ! will_install_packages; then
       check_build_tools
     fi
@@ -169,7 +165,7 @@ check_environment() {
     die "--mali-source: no such file: $MALI_SRC"
   fi
   if (( ! DRY_RUN && ! CONFIG_ONLY && ! REMOVE )) && [[ -z "$PREFIX" ]]; then
-    sudo -v || die "sudo needs your password (the one chosen during the install; sticks made before v1.50: alarm unless you changed it)."
+    sudo -v || die "sudo needs your password (the one chosen during the install; older sticks whose installer never asked for one: alarm unless you changed it)."
   fi
 }
 
@@ -184,14 +180,9 @@ install_packages() {
   local want=() avail=() p
   local base=(hyprland xdg-desktop-portal-hyprland gcc libglvnd mesa libc++ libc++abi libdrm python-pip)
   local apps=(waybar fuzzel swaybg mako foot brightnessctl papirus-icon-theme adw-gtk-theme inter-font noto-fonts noto-fonts-emoji pcmanfm)
-  # Sound (v1.39.2): without PipeWire nothing plays (browsers use the PulseAudio
-  # API); tarkin-audio.service needs pactl (libpulse), alsaucm and amixer (alsa-utils),
-  # and python for the headphone jack watcher (v1.50).
-  local audio=(pipewire wireplumber pipewire-pulse libpulse alsa-utils alsa-ucm-conf python)
+  local audio=(pipewire wireplumber pipewire-pulse libpulse alsa-utils alsa-ucm-conf python bluez bluez-utils blueman pavucontrol hypridle swaylock)
   for p in "${base[@]}" "${apps[@]}" "${audio[@]}"; do
     if [[ "$p" == pipewire-pulse ]] && pacman -Q pulseaudio >/dev/null 2>&1; then
-      # pipewire-pulse conflicts with pulseaudio; with --noconfirm pacman answers
-      # "no" to removing it and aborts the whole transaction.
       warn "pulseaudio is installed, so pipewire-pulse is skipped (browsers may stay silent). Replace it with: sudo pacman -S pipewire-pulse (answer y to remove pulseaudio)."
       continue
     fi
@@ -199,11 +190,6 @@ install_packages() {
       want+=("$p")
     fi
   done
-  # The whole "gnome" group is not installed: on Arch Linux ARM some members
-  # (gnome-books, gnome-boxes) depend on webkit2gtk/libsoup2, which no longer
-  # exist, and pacman then aborts the whole transaction. A desktop-only list
-  # is used instead; every package is checked for availability AND resolvable
-  # dependencies, so one broken package is skipped instead of failing all.
   local gnome_core=(gnome-shell gnome-session gnome-settings-daemon gnome-control-center gdm gnome-keyring xdg-desktop-portal-gnome xdg-user-dirs-gtk gnome-backgrounds gnome-menus)
   local gnome_apps=(nautilus gnome-console gnome-text-editor gnome-system-monitor gnome-disk-utility gnome-calculator gnome-font-viewer gvfs loupe)
   for p in "${gnome_core[@]}" "${gnome_apps[@]}"; do
@@ -233,7 +219,9 @@ install_packages() {
 }
 
 lib_has_relr_abi() {
-  readelf -V "$1" 2>/dev/null | grep -q GLIBC_ABI_DT_RELR
+  local versions
+  versions="$(LC_ALL=C readelf -V -- "$1")" || return 1
+  grep -q GLIBC_ABI_DT_RELR <<<"$versions"
 }
 
 find_lief_python() {
@@ -319,26 +307,54 @@ patch_relr() {
   lib_has_relr_abi "$dst" || die "The patched libmali still misses GLIBC_ABI_DT_RELR."
 }
 
+validate_mali_source() {
+  local src="$1" header dynamic digest bytes versions
+  [[ -f "$src" && -r "$src" && -s "$src" ]] || { warn "Mali source is missing, unreadable or empty: $src"; return 1; }
+  if ! digest="$(sha256sum -- "$src")"; then
+    warn "Mali source could not be read completely: $src"
+    return 1
+  fi
+  bytes="$(stat -Lc %s -- "$src")" || return 1
+  echo "[+] Mali candidate: $src; bytes=$bytes; sha256=$digest" >&2
+  header="$(LC_ALL=C readelf -h -- "$src")" || { warn "Invalid ELF header: $src"; return 1; }
+  if ! grep -q 'Class:.*ELF64' <<<"$header" ||
+     ! grep -q 'Machine:.*AArch64' <<<"$header" ||
+     ! grep -q 'Type:.*DYN' <<<"$header"; then
+    warn "Mali source must be an ELF64 AArch64 shared object: $src"
+    return 1
+  fi
+  dynamic="$(LC_ALL=C readelf -d -- "$src")" || { warn "Cannot inspect ELF dynamic metadata: $src"; return 1; }
+  if [[ "$dynamic" != *"(STRTAB)"* ]]; then
+    warn "Missing ELF dynamic string table: $src"
+    return 1
+  fi
+  echo "$dynamic" >&2
+  versions="$(LC_ALL=C readelf -V -- "$src")" || { warn "Cannot inspect ELF symbol versions: $src"; return 1; }
+  sed -n '/Version needs section/,$p' <<<"$versions" >&2
+}
+
 pick_mali_source() {
   local f
+  MALI_SELECTED=""
   if [[ -n "$MALI_SRC" ]]; then
-    [[ -f "$MALI_SRC" ]] || die "--mali-source: no such file: $MALI_SRC"
-    realpath -e "$MALI_SRC"
+    if ! validate_mali_source "$MALI_SRC"; then
+      die "--mali-source is invalid: $MALI_SRC. Supply a readable, complete copy of the known working CM1406 driver; automatic sources were not used."
+    fi
+    MALI_SELECTED="$(realpath -e -- "$MALI_SRC")" || return 1
     return 0
   fi
-  if [[ -f "$MALI_LIB/libmali.so.0.54.1" ]]; then
-    echo "$MALI_LIB/libmali.so.0.54.1"
-    return 0
-  fi
-  for f in "$HOME/gpu-test/mali/lib/libmali.so.0.54.1.relr" \
+  for f in "$MALI_LIB/libmali.so.0.54.1" \
+           "$HOME/gpu-test/mali/lib/libmali.so.0.54.1.relr" \
            "$HOME/gpu-test/mali/libmali.so.0.54.1.relr" \
            "$HOME/gpu-test/mali/lib/libmali.so.0.54.1" \
            "$HOME/gpu-test/mali/libmali.so.0.54.1" \
            "$HOME/gpu-test/mali/libmali.so.0.54.1.orig"; do
-    if [[ -f "$f" ]]; then
-      echo "$f"
+    [[ -e "$f" ]] || continue
+    if validate_mali_source "$f"; then
+      MALI_SELECTED="$f"
       return 0
     fi
+    warn "Rejected automatic Mali source: $f; trying the next candidate."
   done
   find_mali_in_chromeos
 }
@@ -347,46 +363,122 @@ find_mali_in_chromeos() {
   if (( DRY_RUN )) || [[ -n "$PREFIX" ]]; then
     return 1
   fi
-  local part mnt hit dst
-  if [[ -z "$CHROMEOS_MNT" ]]; then
-    CHROMEOS_MNT="$(mktemp -d /tmp/tarkin-chromeos.XXXXXX)"
-  fi
-  mnt="$CHROMEOS_MNT"
-  for part in /dev/disk/by-partlabel/ROOT-A /dev/disk/by-partlabel/ROOT-B; do
-    if [[ ! -e "$part" ]]; then
-      continue
-    fi
-    if mountpoint -q "$mnt" 2>/dev/null; then
-      umount "$mnt" 2>/dev/null || true
-    fi
-    if ! "${SUDO[@]}" mount -o ro,noload "$part" "$mnt" 2>/dev/null; then
-      warn "Could not mount $part read-only; skipping it."
-      continue
-    fi
-    hit="$("${SUDO[@]}" find "$mnt/usr/lib64" "$mnt/usr/lib" -name 'libmali.so.0.54*' -not -type l 2>/dev/null | sort | tail -1)"
-    if [[ -z "$hit" ]]; then
-      hit="$("${SUDO[@]}" find "$mnt/usr/lib64" "$mnt/usr/lib" -name 'libmali.so*' -not -type l 2>/dev/null | sort | tail -1)"
-    fi
-    dst=""
-    if [[ -n "$hit" ]]; then
-      # Copy while the partition is still mounted; this function's stdout is the path only.
-      echo "[+] Found libmali on $part: $hit (copied read-only, the partition is never written to)" >&2
-      MALI_TMP="$(mktemp -d /tmp/tarkin-mali.XXXXXX)"
-      dst="$MALI_TMP/libmali.so"
-      if ! "${SUDO[@]}" cat "$hit" > "$dst" || [[ ! -s "$dst" ]]; then
-        warn "Could not copy $hit; skipping $part."
-        rm -rf "$MALI_TMP"; MALI_TMP=""; dst=""
-      fi
-    fi
-    umount "$mnt" 2>/dev/null || "${SUDO[@]}" umount "$mnt" 2>/dev/null || true
-    if [[ -n "$dst" ]]; then
-      rmdir "$mnt" 2>/dev/null || true
-      echo "$dst"
-      return 0
-    fi
+  local tool rc
+  for tool in unshare lsblk findmnt blkid mount umount readlink find sort readelf sha256sum stat; do
+    command -v "$tool" >/dev/null || { warn "GPU discovery needs $tool; install the missing tool or use --mali-source /path/to/known-working/libmali.so."; return 1; }
   done
-  rmdir "$mnt" 2>/dev/null || true
-  return 1
+  MALI_TMP="$(mktemp -d /tmp/tarkin-mali.XXXXXX)" || return 1
+  : > "$MALI_TMP/libmali.so"
+  {
+    declare -f warn validate_mali_source
+    cat <<'CHROMEOS_READER_EOF'
+set -uo pipefail
+dst="$1"
+mnt="$dst/mount"
+mkdir "$mnt" || exit 1
+mounted=0
+finish() {
+  local status=$?
+  trap - EXIT
+  if (( mounted )); then
+    if ! umount "$mnt"; then
+      warn "ChromeOS unmount failed at $mnt; stopping discovery. The private mount namespace will now close."
+      status=1
+    fi
+  fi
+  rmdir "$mnt" || status=1
+  exit "$status"
+}
+trap finish EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+inventory="$(lsblk -rpn -o PATH,PARTLABEL)"
+rc=$?
+echo "[+] GPU partition inventory (lsblk rc=$rc):" >&2
+echo "$inventory" >&2
+(( rc == 0 )) || exit 1
+for label in ROOT-A ROOT-B; do
+  devices=()
+  while read -r dev partlabel; do
+    [[ "$partlabel" == "$label" ]] && devices+=("$dev")
+  done <<<"$inventory"
+  if (( ${#devices[@]} != 1 )); then
+    warn "$label: found ${#devices[@]} devices; missing or duplicate labels are not selected. Check lsblk -p -o NAME,FSTYPE,PARTLABEL,MOUNTPOINTS."
+    continue
+  fi
+  dev="$(readlink -f -- "${devices[0]}")" || continue
+  [[ -b "$dev" ]] || { warn "$label: not a block device: $dev"; continue; }
+  current="$(findmnt -rn -S "$dev" -o SOURCE,TARGET,FSTYPE,OPTIONS)"
+  rc=$?
+  if (( rc != 1 )); then
+    warn "$label: existing-mount check for $dev returned rc=$rc; skipping. $current"
+    continue
+  fi
+  fs="$(blkid -p -s TYPE -o value "$dev")"
+  rc=$?
+  echo "[+] $label: device=$dev; format=${fs:-unknown}; detector=blkid -p; rc=$rc" >&2
+  (( rc == 0 )) || { warn "$label: unknown or ambiguous signature; use a known working --mali-source."; continue; }
+  case "$fs" in
+    ext3|ext4) opts=ro,noload ;;
+    ext2|erofs|squashfs) opts=ro ;;
+    *) warn "$label: unsupported filesystem '$fs'; no generic mount fallback. Use --mali-source."; continue ;;
+  esac
+  echo "[+] $label: mount -t $fs -o $opts $dev $mnt (private namespace)" >&2
+  mount -t "$fs" -o "$opts" "$dev" "$mnt"
+  rc=$?
+  if (( rc != 0 )); then
+    warn "$label: mount failed (rc=$rc); stderr is above. No weaker options will be tried."
+    continue
+  fi
+  mounted=1
+  selected=0
+  for dir in "$mnt/usr/lib64" "$mnt/usr/lib"; do
+    [[ -d "$dir" ]] || continue
+    resolved="$(readlink -f -- "$dir")" || continue
+    case "$resolved" in "$mnt"/*) ;; *) warn "Skipping library directory outside ChromeOS mount: $dir"; continue ;; esac
+    find -P "$resolved" -type f -name 'libmali.so*' -print0 > "$dst/candidates"
+    rc=$?
+    if (( rc != 0 )); then
+      warn "$label: traversal failed for $dir (rc=$rc); ignoring its partial results."
+      continue
+    fi
+    while IFS= read -r -d '' hit; do
+      [[ -n "$hit" ]] || continue
+      echo "[+] $label: copying candidate $hit" >&2
+      cat -- "$hit" > "$dst/libmali.so"
+      rc=$?
+      if (( rc != 0 )); then
+        warn "$label: copy failed for $hit (rc=$rc); trying the next file."
+        : > "$dst/libmali.so"
+        continue
+      fi
+      if validate_mali_source "$dst/libmali.so"; then
+        selected=1
+        break
+      fi
+      warn "$label: rejected $hit; trying the next file."
+    done < <(LC_ALL=C sort -zr "$dst/candidates")
+    (( selected )) && break
+  done
+  if ! umount "$mnt"; then
+    warn "$label: unmount failed; no other partition will be mounted. Check findmnt and the errors above."
+    exit 1
+  fi
+  mounted=0
+  (( selected )) && exit 0
+  warn "$label: no readable, structurally valid Mali candidate in usr/lib64 or usr/lib."
+done
+exit 1
+CHROMEOS_READER_EOF
+  } > "$MALI_TMP/read-chromeos.sh"
+  if "${SUDO[@]}" unshare --mount --propagation private bash "$MALI_TMP/read-chromeos.sh" "$MALI_TMP"; then
+    MALI_SELECTED="$MALI_TMP/libmali.so"
+    return 0
+  else
+    rc=$?
+    warn "ChromeOS Mali discovery failed (rc=$rc); inspect partition/copy errors above. Use --mali-source with a known working CM1406 driver. No ChromeOS write or repair was attempted."
+    return 1
+  fi
 }
 
 write_shim() {
@@ -658,13 +750,14 @@ run_gpu_probes() {
     warn "Skipping the GPU probe (--skip-gpu-test)."
     return 0
   fi
+  command -v timeout >/dev/null || die "GPU probes need timeout (coreutils); install it before retrying."
   echo "== GPU probe: EGL + GLES through libmali, DMA-BUF render into a DRM dumb buffer (10 frames)..."
-  if ! env LD_LIBRARY_PATH="$d" "$d/mali-probe" 10; then
-    die "The Mali GPU probe failed; nothing was installed. Check: tarkin-gpu-check, dmesg | grep -i mali, and that this user is in the video and render groups."
+  if ! timeout --kill-after=5s 45s env LD_LIBRARY_PATH="$d" "$d/mali-probe" 10; then
+    die "The Mali GPU probe failed or timed out; GPU files were not installed (packages may already have changed). Check: tarkin-gpu-check, dmesg | grep -i mali, and that this user is in the video and render groups."
   fi
   echo "== Shim probe: the EGL device/platform extensions Hyprland and Aquamarine need..."
-  if ! env LD_LIBRARY_PATH="$d" LD_PRELOAD="$d/egl-mali-shim.so" "$d/shim-probe"; then
-    die "The EGL shim probe failed; nothing was installed."
+  if ! timeout --kill-after=5s 45s env LD_LIBRARY_PATH="$d" LD_PRELOAD="$d/egl-mali-shim.so" "$d/shim-probe"; then
+    die "The EGL shim probe failed or timed out; GPU files were not installed (packages may already have changed). Check the driver ABI, GPU permissions and dmesg."
   fi
 }
 
@@ -746,11 +839,11 @@ install_gpu_files() {
 install_gpu_stack() {
   local src
   info "Locating the ChromeOS libmali (Mali-G57 userspace driver)..."
-  if ! src="$(pick_mali_source)"; then
-    die "No libmali found. Copy it from the ChromeOS root partition (mount -o ro,noload) or pass: --mali-source /path/to/libmali.so"
+  if ! pick_mali_source; then
+    die "No usable libmali found. Read the source diagnostics above; pass --mali-source /path/to/a/known-working/CM1406/libmali.so. Filesystem-specific read-only options are required; never remove ext journal protection."
   fi
+  src="$MALI_SELECTED"
   echo "[+] Source: $src"
-  case "$src" in /tmp/tarkin-mali.*/libmali.so) MALI_TMP="$(dirname "$src")" ;; esac
   if ! readelf -h "$src" 2>/dev/null | grep -q 'Machine:.*AArch64'; then
     die "$src is not an AArch64 ELF shared library."
   fi
@@ -789,6 +882,13 @@ write_console_files() {
   cat > "$tmp/console" <<'TARKIN_CONSOLE_EOF'
 #!/bin/bash
 set -u
+if [[ -e /etc/systemd/system/display-manager.service || -L /etc/systemd/system/display-manager.service ]] ||
+   [[ "$(cat /etc/tarkin/display-owner 2>/dev/null)" == xfce ]] ||
+   systemctl is-active --quiet gdm.service sddm.service 2>/dev/null ||
+   systemctl is-enabled --quiet gdm.service sddm.service 2>/dev/null; then
+  echo "A display manager owns or reserves the display. Use sudo tarkin-display terminal (or hyprland), then reboot; do not start another compositor." >&2
+  exit 1
+fi
 cd "$HOME" || exit 1
 uid="$(id -u)"
 export XDG_RUNTIME_DIR="/run/user/$uid"
@@ -800,8 +900,6 @@ if [[ ! -d "$XDG_RUNTIME_DIR" ]]; then
   echo "tarkin-console: $XDG_RUNTIME_DIR missing after ${n}s (user manager not running? check linger)" >&2
   exit 1
 fi
-# This is a *system* service, not a logind session: export the user D-Bus so
-# GTK/portal apps started from the terminal or the desktop can reach it.
 export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
 export LIBSEAT_BACKEND=seatd SEATD_VTBOUND=0
 export LANG=C.UTF-8
@@ -814,15 +912,26 @@ for c in /sys/class/drm/card[0-9]; do
 done
 unset WAYLAND_DISPLAY DISPLAY
 [[ -f /etc/tarkin/console.env ]] && . /etc/tarkin/console.env
+widevine_gmp_path() {
+  local line value="" count=0 real re='^MOZ_GMP_PATH="(/opt/WidevineCdm/[A-Za-z0-9._/-]+)"$'
+  [[ -f /etc/environment && ! -L /etc/environment && "$(stat -c %u -- /etc/environment)" == 0 ]] || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?MOZ_GMP_PATH[[:space:]]*= ]] || continue
+    count=$((count + 1))
+    [[ "$line" =~ $re ]] && value="${BASH_REMATCH[1]}"
+  done < /etc/environment
+  [[ $count == 1 && -n "$value" && "$value" != *..* ]] || return 1
+  real="$(readlink -e -- "$value")" || return 1
+  [[ -d "$real" && -f "$real/manifest.json" && -f "$real/libwidevinecdm.so" ]] || return 1
+  [[ "$(stat -c '%u %A' -- "$real")" =~ ^0\ d....-..-.$ ]] || return 1
+  printf '%s\n' "$value"
+}
+if gmp="$(widevine_gmp_path)"; then export MOZ_GMP_PATH="$gmp"; fi
 export XKB_DEFAULT_LAYOUT="${XKB_DEFAULT_LAYOUT:-us}"
 export AQ_DRM_DEVICES="$card" XDG_SESSION_TYPE=wayland
 session="${TARKIN_SESSION:-terminal}"
 echo "tarkin-console: display $card, keyboard layout $XKB_DEFAULT_LAYOUT, session $session"
 
-# The on-screen terminal (cage + foot) is wlroots. There is no working EGL for
-# this display, so letting wlroots probe GLES2 stalls or fails (long black
-# screen, restart loop). Pin it like the earlier working release did: pixman
-# renderer, software cursor, MediaTek display node. Hyprland unsets WLR_RENDERER.
 run_terminal() {
   unset LD_PRELOAD LD_LIBRARY_PATH LIBGL_ALWAYS_SOFTWARE GALLIUM_DRIVER MESA_LOADER_DRIVER_OVERRIDE WLR_RENDERER_ALLOW_SOFTWARE AQ_NO_MODIFIERS
   export WLR_RENDERER=pixman WLR_NO_HARDWARE_CURSORS=1 WLR_DRM_DEVICES="$card"
@@ -919,21 +1028,11 @@ TARKIN_CONSOLE_EOF
 set -euo pipefail
 case "${1:-}" in desktop|terminal) ;; *) echo "Usage: sudo tarkin-session desktop|terminal" >&2; exit 1 ;; esac
 [[ $EUID -eq 0 ]] || { echo "Run it with sudo." >&2; exit 1; }
-if systemctl is-active --quiet gdm.service 2>/dev/null; then
-  echo "GDM owns the display (install-hyprland.sh): pick the session with the gear in GDM." >&2
-  echo "To use the on-screen console instead: sudo systemctl disable --now gdm && sudo systemctl enable --now tarkin-console" >&2
-  exit 1
+if [[ -x /usr/local/bin/tarkin-display ]]; then
+  case "$1" in desktop) exec /usr/local/bin/tarkin-display hyprland ;; terminal) exec /usr/local/bin/tarkin-display terminal ;; esac
 fi
-f=/etc/tarkin/console.env
-mkdir -p /etc/tarkin
-touch "$f"
-if grep -q '^TARKIN_SESSION=' "$f"; then
-  sed -i "s/^TARKIN_SESSION=.*/TARKIN_SESSION=$1/" "$f"
-else
-  echo "TARKIN_SESSION=$1" >> "$f"
-fi
-echo "Session set to: $1. Restarting the display now (this window will close)..."
-systemctl --no-block restart tarkin-console.service
+echo "tarkin-display is missing. Reinstall the v1.40 rootfs tools before changing display ownership." >&2
+exit 1
 TARKIN_SESSION_EOF
   sys install -D -m 755 "$tmp/console" "$CONSOLE"
   sys install -D -m 755 "$tmp/tarkin-session" "$TARKIN_SESSION_BIN"
@@ -969,6 +1068,121 @@ backup_file() {
   fi
 }
 
+comfort_source_root() {
+  local tree
+  tree="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/rootfs"
+  if [[ -d "$tree/etc/xdg/tarkin" ]]; then
+    printf '%s\n' "$tree"
+  elif [[ -z "$PREFIX" && -d /etc/xdg/tarkin ]]; then
+    printf '/\n'
+  else
+    return 1
+  fi
+}
+
+install_comfort_files() {
+  if [[ -z "$PREFIX" ]]; then
+    local command_name
+    for command_name in hypridle swaylock python3; do
+      command -v "$command_name" >/dev/null 2>&1 ||
+        die "Missing $command_name. Install comfort dependencies: sudo pacman -S --needed hypridle swaylock python"
+    done
+  fi
+  local source_dir
+  source_dir="$(comfort_source_root)" || die "Missing rootfs/ next to this script; use the complete release tree, not install-hyprland.sh alone."
+  local files=(
+    usr/local/bin/tarkin-lock
+    usr/local/bin/tarkin-dpms
+    usr/local/bin/tarkin-comfort-start
+    usr/local/libexec/tarkin/audio-profile
+    etc/xdg/tarkin/hypridle.conf
+    etc/xdg/tarkin/swaylock.config
+    etc/wireplumber/wireplumber.conf.d/52-tarkin-bluetooth.conf
+  )
+  local f mode
+  for f in "${files[@]}"; do
+    if [[ "$source_dir" == / ]]; then
+      [[ -f "/$f" ]] || die "Missing /$f: this stick lacks the v1.40 files. Run install-hyprland.sh from the complete v1.40 release tree."
+      case "$f" in usr/local/bin/*|usr/local/libexec/*) [[ -x "/$f" ]] || die "/$f is not executable; reinstall it from the v1.40 release tree." ;; esac
+      continue
+    fi
+    [[ -f "$source_dir/$f" ]] || die "Missing $source_dir/$f; use the complete release tree, not install-hyprland.sh alone."
+    mode=644
+    case "$f" in usr/local/bin/*|usr/local/libexec/*) mode=755 ;; esac
+    if [[ -e "$PREFIX/$f" ]] && ! cmp -s "$source_dir/$f" "$PREFIX/$f"; then
+      if [[ "$f" == usr/local/libexec/tarkin/audio-profile ]] &&
+         [[ "$(sha256sum "$PREFIX/$f" | cut -d ' ' -f1)" == e6ec1f7122d696319827f922e839b3658797fe9104695e7f6c363cde1082d9e6 ]]; then
+        sys cp -p "$PREFIX/$f" "$PREFIX/$f.before-v140-comfort"
+        sys install -D -m "$mode" "$source_dir/$f" "$PREFIX/$f"
+      else
+        warn "Keeping customized $PREFIX/$f; compare it with $source_dir/$f for comfort fixes."
+      fi
+    else
+      sys install -D -m "$mode" "$source_dir/$f" "$PREFIX/$f"
+    fi
+  done
+}
+
+configure_comfort() {
+  if [[ -z "$PREFIX" ]] && [[ ! -x /usr/local/bin/tarkin-lock || ! -x /usr/local/bin/tarkin-comfort-start ]]; then
+    warn "Comfort helpers are missing; Hyprland config is kept without adding inactive lock bindings. Run the complete install-hyprland.sh (not --config-only) from this release."
+    return 0
+  fi
+  local cfg="${XDG_CONFIG_HOME:-$HOME/.config}" source_dir file
+  source_dir="$(comfort_source_root)" || die "Missing rootfs/etc/xdg/tarkin next to this script and in /etc/xdg/tarkin; use the complete v1.40 release tree."
+  source_dir="${source_dir%/}/etc/xdg/tarkin"
+  mkdir -p "$cfg/hypr" "$cfg/swaylock"
+  if [[ ! -e "$cfg/hypr/hypridle.conf" ]]; then
+    cp "$source_dir/hypridle.conf" "$cfg/hypr/hypridle.conf"
+  fi
+  if [[ ! -e "$cfg/swaylock/config" ]]; then
+    cp "$source_dir/swaylock.config" "$cfg/swaylock/config"
+  fi
+  for file in "$cfg/hypr/hyprland.lua" "$cfg/hypr/hyprland.conf"; do
+    [[ -f "$file" ]] || continue
+    grep -q 'tarkin-comfort-start' "$file" && continue
+    if grep -Eiq 'hypridle|swaylock|tarkin-lock|[+,] *L([", ]|$)|source[[:space:]]*=|dofile|require' "$file"; then
+      warn "Keeping existing lock/idle bindings in $file. Optional startup: /usr/local/bin/tarkin-comfort-start; lock: /usr/local/bin/tarkin-lock."
+      continue
+    fi
+    cp -p "$file" "$file.before-tarkin-comfort"
+    if [[ "$file" == *.lua ]]; then
+      cat >> "$file" <<'COMFORT_LUA'
+
+hl.on("hyprland.start", function()
+    hl.exec_cmd("/usr/local/bin/tarkin-comfort-start")
+end)
+hl.bind("SUPER + L", hl.dsp.exec_cmd("/usr/local/bin/tarkin-lock"))
+COMFORT_LUA
+      if ! Hyprland --verify-config; then
+        cp -p "$file.before-tarkin-comfort" "$file"
+        die "Comfort config rejected; restored $file. Check the Hyprland version and add the startup/lock binding manually."
+      fi
+    else
+      cat >> "$file" <<'COMFORT_CONF'
+
+exec-once = /usr/local/bin/tarkin-comfort-start
+bind = SUPER, L, exec, /usr/local/bin/tarkin-lock
+COMFORT_CONF
+    fi
+  done
+}
+
+enable_bluetooth() {
+  [[ -z "$PREFIX" ]] || return 0
+  command -v bluetoothctl >/dev/null 2>&1 || { warn "Bluetooth tools missing. Install: sudo pacman -S --needed bluez bluez-utils"; return 1; }
+  sys systemctl enable --now bluetooth.service ||
+    { warn "Cannot start bluetooth.service. Inspect: sudo systemctl status bluetooth.service; journalctl -u bluetooth.service -b"; return 1; }
+  local adapter
+  adapter="$(bluetoothctl list)" || { warn "BlueZ did not answer. Inspect: systemctl status bluetooth.service"; return 1; }
+  if [[ -n "$adapter" ]]; then
+    bluetoothctl power on || { warn "Bluetooth power-on failed. Inspect: rfkill list bluetooth; unblock with: sudo rfkill unblock bluetooth"; return 1; }
+    ok "Bluetooth enabled; pair your device with blueman-manager (or bluetoothctl)."
+  else
+    warn "BlueZ enabled, but no Bluetooth adapter is visible. Inspect: rfkill list bluetooth; dmesg | grep -i -E 'bluetooth|firmware'"
+  fi
+}
+
 write_hyprland_config() {
   local cfg="${XDG_CONFIG_HOME:-$HOME/.config}"
   local lua="$cfg/hypr/hyprland.lua"
@@ -978,12 +1192,18 @@ write_hyprland_config() {
   if ! command -v Hyprland >/dev/null 2>&1; then
     die "Hyprland is not installed; run this script without --config-only (or --gpu-only)."
   fi
+  if (( ! RESET_CONFIG )) && [[ ! -e "$lua" && -e "$conf" ]]; then
+    ok "Keeping the existing legacy $conf."
+    configure_comfort
+    return 0
+  fi
   if [[ -f "$lua" && $RESET_CONFIG -eq 0 ]]; then
     if Hyprland --verify-config >/dev/null 2>&1; then
       ok "Keeping the existing $lua (it verifies)."
+      configure_comfort
       return 0
     fi
-    warn "$lua has errors; backing it up and writing a known-good config."
+    die "$lua has errors and was preserved. Run Hyprland --verify-config, fix it, or explicitly use --reset-config (backup kept)."
   elif [[ -f "$lua" ]]; then
     warn "--reset-config: backing up the existing config and writing a known-good one."
   fi
@@ -1149,10 +1369,9 @@ EOF
     die "The generated config does not verify; Hyprland reported the errors above. Check $lua"
   fi
   ok "Wrote $lua and $conf; Hyprland verifies them."
+  configure_comfort
 }
 
-# The USB installer writes TARKIN_SESSION=terminal; without desktop the console
-# never tries Hyprland and only shows the terminal.
 set_console_session_desktop() {
   if (( DRY_RUN )); then
     echo "   [dry-run] set TARKIN_SESSION=desktop in $CONSOLE_ENV"
@@ -1176,27 +1395,29 @@ has_console_unit() {
   [[ -e /usr/lib/systemd/system/tarkin-console.service || -e /etc/systemd/system/tarkin-console.service ]]
 }
 
-# Default display setup (v1.39): no display manager; tarkin-console starts
-# hyprland-mali on its own at boot (then Hyprland, software, terminal).
+assert_display_owner() {
+  [[ -n "$PREFIX" ]] && return 0
+  local wanted="$1" dm=/etc/systemd/system/display-manager.service owner
+  owner="$(cat /etc/tarkin/display-owner 2>/dev/null || true)"
+  [[ "$owner" != xfce ]] || die "XFCE owns the next boot. Use sudo tarkin-display hyprland, reboot, then rerun this installer."
+  if [[ -e "$dm" || -L "$dm" ]]; then
+    [[ "$wanted" == gdm && -L "$dm" && "$(readlink "$dm")" == /usr/lib/systemd/system/gdm.service ]] ||
+      die "A display manager alias already reserves the screen. Use sudo tarkin-display hyprland (or terminal), reboot, then retry. Unfamiliar aliases must be reviewed manually."
+  fi
+  if [[ "$wanted" != gdm ]] && { systemctl is-enabled --quiet gdm.service sddm.service 2>/dev/null || systemctl is-active --quiet gdm.service sddm.service 2>/dev/null; }; then
+    die "A display manager owns the screen. Select hyprland with sudo tarkin-display and reboot before rerunning."
+  fi
+  if [[ "$wanted" == gdm ]] && { systemctl is-enabled --quiet sddm.service 2>/dev/null || systemctl is-active --quiet sddm.service 2>/dev/null; }; then
+    die "SDDM owns the screen. Select hyprland with sudo tarkin-display and reboot before requesting GDM."
+  fi
+}
+
 enable_console_display() {
   if [[ -n "$PREFIX" ]]; then
     return 0
   fi
-  if ! has_console_unit; then
-    warn "tarkin-console.service is not installed on this system; falling back to GDM (the greeter may go black on the CM1406)."
-    enable_gdm
-    DISPLAY_MODE=gdm
-    return 0
-  fi
-  if systemctl is-enabled gdm.service >/dev/null 2>&1; then
-    sys systemctl disable gdm.service
-    ok "gdm.service disabled (GNOME stays installed; use --with-gdm to get the login screen back)."
-  fi
-  local dm
-  dm="$(readlink -f /etc/systemd/system/display-manager.service 2>/dev/null || true)"
-  if [[ -n "$dm" && "$(basename "$dm")" == "gdm.service" ]]; then
-    sys rm -f /etc/systemd/system/display-manager.service
-  fi
+  has_console_unit || die "tarkin-console.service is missing. Reinstall the rootfs tools; refusing an implicit GDM fallback."
+  assert_display_owner console
   set_console_session_desktop
   sys systemctl enable tarkin-console.service
   sys systemctl set-default multi-user.target
@@ -1208,32 +1429,18 @@ enable_gdm() {
   if [[ -n "$PREFIX" ]]; then
     return 0
   fi
-  local dm
-  if systemctl is-enabled gdm.service >/dev/null 2>&1; then
-    ok "gdm.service is already enabled."
-  else
-    dm="$(readlink -f /etc/systemd/system/display-manager.service 2>/dev/null || true)"
-    if [[ -n "$dm" && "$(basename "$dm")" != "gdm.service" && -e "$dm" ]]; then
-      warn "Another display manager is enabled ($(basename "$dm")); switching the default to GDM (GNOME stays installed)."
-      sys systemctl --force enable gdm.service
-    else
-      sys systemctl enable gdm.service
-    fi
-    ok "gdm.service enabled."
-  fi
+  assert_display_owner gdm
+  sys systemctl enable gdm.service
   if has_console_unit; then
     if systemctl is-enabled tarkin-console.service >/dev/null 2>&1; then
       sys systemctl disable tarkin-console.service
       ok "tarkin-console.service disabled: GDM owns the display at boot. To go back to the console:"
-      echo "      bash install-hyprland.sh --no-packages   (or: sudo systemctl disable gdm && sudo systemctl enable tarkin-console && sudo systemctl set-default multi-user.target)"
+      echo "      sudo tarkin-display hyprland   (then reboot)"
     fi
   fi
   sys systemctl set-default graphical.target
 }
 
-# Sound (v1.39.2, v1.50): PipeWire runs in the user session; tarkin-audio.service
-# (user unit) selects the pro-audio profile, turns the speaker route on, sets a
-# first volume and follows the headset jack (speakers <-> headphones).
 enable_audio() {
   if [[ -n "$PREFIX" ]]; then
     return 0
@@ -1257,12 +1464,10 @@ enable_audio() {
       warn "Could not enable tarkin-audio.service; run: sudo systemctl --global enable tarkin-audio.service"
     fi
   else
-    warn "tarkin-audio.service is missing (old stick?): PipeWire runs, but the speakers may stay off. Copy from this release: rootfs/etc/systemd/user/tarkin-audio.service, rootfs/etc/tarkin/audio.conf, rootfs/usr/local/libexec/tarkin/audio-profile and audio-jack, rootfs/usr/local/bin/tarkin-audio-test (CHANGELOG.md, \"Updating a stick made before v1.50\")."
+    warn "tarkin-audio.service is missing (old stick?): PipeWire runs, but the speakers may stay off. Copy from this release: rootfs/etc/systemd/user/tarkin-audio.service, rootfs/etc/tarkin/audio.conf, rootfs/usr/local/libexec/tarkin/audio-profile and audio-jack, rootfs/usr/local/bin/tarkin-audio-test (CHANGELOG.md, \"Updating an older stick\")."
   fi
 }
 
-# v1.50: a successful run (first-boot service or by hand) settles the first-boot setup, so that the
-# terminal stops announcing it and the service does not run it a second time.
 clear_firstboot_markers() {
   local d=/var/lib/tarkin
   if [[ -n "$PREFIX" ]]; then
@@ -1310,6 +1515,10 @@ main() {
   fi
 
   if (( CONFIG_ONLY )); then
+    if (( DRY_RUN )); then
+      info "Would preserve existing dotfiles and configure lock/idle defaults; no files changed."
+      exit 0
+    fi
     write_hyprland_config
     exit 0
   fi
@@ -1321,13 +1530,14 @@ main() {
     fi
     if (( ! GPU_ONLY )); then
       if [[ -f "${XDG_CONFIG_HOME:-$HOME/.config}/hypr/hyprland.lua" ]]; then
-        info "Config: $(if Hyprland --verify-config >/dev/null 2>&1; then echo "the existing ~/.config/hypr/hyprland.lua verifies and would be KEPT"; else echo "the existing ~/.config/hypr/hyprland.lua has errors and would be REPLACED (backup kept)"; fi)"
+        info "Config: $(if Hyprland --verify-config >/dev/null 2>&1; then echo "the existing ~/.config/hypr/hyprland.lua verifies and would be KEPT"; else echo "the existing ~/.config/hypr/hyprland.lua has errors: it would be kept and the install would stop (use --reset-config to replace it, backup kept)"; fi)"
       else
         info "Config: ~/.config/hypr/hyprland.lua is missing and would be written (with hyprland.conf)."
       fi
     fi
     local src=""
-    if src="$(pick_mali_source)"; then
+    if pick_mali_source; then
+      src="$MALI_SELECTED"
       if lib_has_relr_abi "$src"; then
         info "GPU: would install libmali from $src (already patched for Arch's glibc)."
       else
@@ -1347,8 +1557,15 @@ main() {
     if [[ -z "$PREFIX" ]] && (( ! GPU_ONLY )); then
       info "Would enable PipeWire in your session and tarkin-audio.service (speakers, headphone jack switching), and mark the first-boot setup as done."
     fi
+    if (( ! GPU_ONLY )); then
+      info "Would install bluez bluez-utils blueman pavucontrol hypridle swaylock, enable bluetooth.service, and add safe lock/idle defaults (300/330 seconds, Super+L; no suspend)."
+    fi
     info "Dry run finished; nothing was changed."
     exit 0
+  fi
+
+  if (( ! GPU_ONLY )); then
+    if (( WITH_GDM )); then assert_display_owner gdm; else assert_display_owner console; fi
   fi
 
   if will_install_packages; then
@@ -1364,6 +1581,7 @@ main() {
   fi
 
   if (( ! GPU_ONLY )); then
+    install_comfort_files
     write_hyprland_config
   fi
 
@@ -1376,6 +1594,7 @@ main() {
       enable_console_display
     fi
     enable_audio
+    enable_bluetooth || warn "Bluetooth is not ready; Hyprland, the GPU stack and sound are installed anyway. Fix it with the command above, then: sudo systemctl enable --now bluetooth.service && bluetoothctl power on"
   fi
 
   test_wrapper
@@ -1400,7 +1619,7 @@ main() {
     echo "      1. Reboot: Hyprland (Mali GPU) starts by itself."
     echo "      2. Check the GPU afterwards with: tarkin-gpu-check (or sudo tarkin-diag)"
     echo "      3. Check the sound with: tarkin-audio-test"
-    echo "      4. Terminal only: sudo tarkin-session terminal (back: sudo tarkin-session desktop)"
+    echo "      4. Terminal only, from the next boot: sudo tarkin-display terminal (back: sudo tarkin-display hyprland)"
   elif [[ -z "$PREFIX" ]]; then
     echo "    Display   : GDM (GNOME is untouched; tarkin-console is disabled)"
     echo

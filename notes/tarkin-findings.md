@@ -111,9 +111,9 @@ open, so no compositor could be started during testing), the pacman/systemctl st
 (sudo needs a password), and Firefox acceleration.
 
 
-## v1.50: assumptions that still need the device
+## v1.40: assumptions that still need the device
 
-Nothing below was observed on the CM1406; each item is used by v1.50 code and listed with the check to run.
+Nothing below was observed on the CM1406; each item is used by v1.40 code and listed with the check to run.
 
 - Card id `mt8189rt5650` (from the `cdev "hw:mt8189rt5650"` lines of HiFi.conf): `cat /proc/asound/card*/id`.
   `audio-profile` falls back to the card name in `/proc/asound/cards`.
