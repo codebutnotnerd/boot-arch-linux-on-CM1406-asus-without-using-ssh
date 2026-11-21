@@ -1,0 +1,11 @@
+[Unit]
+Description=Check that this stick stays bootable (kernel partition flags, kernel modules)
+After=local-fs.target systemd-udev-settle.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/libexec/tarkin/bootcheck
+
+[Install]
+WantedBy=multi-user.target

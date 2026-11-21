@@ -1,0 +1,121 @@
+#!/bin/bash
+set -Eeuo pipefail
+die() { echo "tarkin-display: $*" >&2; exit 1; }
+[[ $EUID -eq 0 ]] || die "Run with sudo."
+[[ $# == 1 ]] || die "Usage: sudo tarkin-display hyprland|xfce|terminal"
+mode=$1
+case "$mode" in hyprland|xfce|terminal) ;; *) die "Choose hyprland, xfce or terminal." ;; esac
+mkdir -p /run/lock
+exec 9>/run/lock/tarkin-display.lock
+flock -n 9 || die "Another display selection is running; wait for it to finish."
+for marker in pending failed; do
+  [[ ! -e /var/lib/tarkin/firstboot.$marker ]] || die "First boot is $marker. Finish/repair bash ~/install-hyprland.sh before changing display ownership."
+done
+state="$(systemctl show -p ActiveState --value tarkin-firstboot.service)" ||
+  die "Cannot inspect first boot; check systemctl status tarkin-firstboot.service."
+case "$state" in active|activating|deactivating|reloading) die "First boot is running; wait for it to finish." ;; esac
+[[ -x /usr/local/libexec/tarkin/console && -x /usr/local/libexec/tarkin/display-guard &&
+   -x /usr/bin/cage && -x /usr/bin/foot ]] ||
+  die "Graphical recovery terminal is incomplete. Reinstall cage, foot and the v1.40 console before switching."
+[[ -f /etc/systemd/system/tarkin-console.service ]] ||
+  die "Missing tarkin-console.service. Reinstall the v1.40 rootfs tools."
+for unit in tarkin-dm-fallback.service; do
+  if systemctl is-enabled --quiet "$unit" 2>/dev/null || systemctl is-active --quiet "$unit" 2>/dev/null; then
+    die "Legacy $unit is enabled/active; disable it, reboot, then retry. It must not start a competing console."
+  fi
+done
+dm=/etc/systemd/system/display-manager.service
+if [[ -e "$dm" || -L "$dm" ]]; then
+  [[ -L "$dm" ]] || die "$dm is not a known alias. Inspect it manually; it will not be overwritten."
+  case "$(readlink "$dm")" in
+    /usr/lib/systemd/system/sddm.service|/usr/lib/systemd/system/gdm.service) ;;
+    *) die "Unfamiliar display-manager alias $(readlink "$dm"). Disable its owner explicitly, reboot, then retry." ;;
+  esac
+fi
+if [[ "$mode" == xfce ]]; then
+  for cmd in Xorg sddm xfce4-session startxfce4; do
+    command -v "$cmd" >/dev/null || die "$cmd is missing. Run bash ~/install-xfce.sh; ownership is unchanged."
+  done
+  [[ -f /usr/lib/systemd/system/sddm.service &&
+     -f /usr/share/xsessions/xfce.desktop &&
+     -f /etc/sddm.conf.d/90-tarkin-xfce.conf &&
+     -f /var/lib/sddm/state.conf ]] ||
+    die "XFCE session/configuration is incomplete. Run bash ~/install-xfce.sh."
+  grep -qx 'Exec=startxfce4' /usr/share/xsessions/xfce.desktop ||
+    die "Unexpected XFCE session Exec. Inspect /usr/share/xsessions/xfce.desktop before enabling SDDM."
+  [[ ! -e /etc/sddm.conf ]] || die "/etc/sddm.conf may override X11. Review it before selecting XFCE."
+  grep -qx 'DisplayServer=x11' /etc/sddm.conf.d/90-tarkin-xfce.conf ||
+    die "SDDM X11 configuration is missing. Rerun bash ~/install-xfce.sh."
+  grep -qx 'Session=/usr/share/xsessions/xfce.desktop' /var/lib/sddm/state.conf ||
+    die "SDDM default session is not XFCE. Rerun bash ~/install-xfce.sh."
+  for conf in /etc/sddm.conf.d/*.conf; do
+    [[ "$conf" == /etc/sddm.conf.d/90-tarkin-xfce.conf || ! -f "$conf" ]] ||
+      die "Conflicting $conf. Review it manually before selecting XFCE."
+  done
+elif [[ "$mode" == hyprland ]]; then
+  command -v Hyprland >/dev/null || die "Hyprland is missing. Install it first, or choose terminal."
+fi
+mkdir -p /etc/tarkin /etc/systemd/system/multi-user.target.wants
+files=("$dm" /etc/systemd/system/default.target /etc/tarkin/console.env /etc/tarkin/display-owner
+       /etc/systemd/system/multi-user.target.wants/tarkin-console.service)
+shopt -s nullglob
+for link in /etc/systemd/system/*.wants/{gdm,sddm,tarkin-console}.service /etc/systemd/system/*.requires/{gdm,sddm,tarkin-console}.service; do
+  [[ -L "$link" ]] || die "Unexpected non-alias $link. Inspect it manually."
+  case "$(readlink "$link")" in
+    /usr/lib/systemd/system/gdm.service|/usr/lib/systemd/system/sddm.service|/etc/systemd/system/tarkin-console.service) ;;
+    *) die "Unexpected link $link. Inspect it manually; no ownership changes made." ;;
+  esac
+  files+=("$link")
+done
+for f in /etc/tarkin/console.env /etc/tarkin/display-owner; do
+  [[ ! -L "$f" && ( ! -e "$f" || -f "$f" ) ]] || die "Unexpected $f; inspect it manually."
+done
+[[ ! -e /etc/systemd/system/default.target || -L /etc/systemd/system/default.target ]] ||
+  die "default.target is not a symlink. Inspect it manually before changing boot targets."
+backup="$(mktemp -d /etc/tarkin/.display-backup.XXXXXX)"
+for i in "${!files[@]}"; do
+  f=${files[$i]}
+  if [[ -e "$f" || -L "$f" ]]; then cp -a -- "$f" "$backup/$i"; fi
+done
+rollback() {
+  trap - ERR HUP INT TERM
+  echo "tarkin-display: selection failed; restoring previous configuration." >&2
+  for i in "${!files[@]}"; do
+    rm -f -- "${files[$i]}"
+    if [[ -e "$backup/$i" || -L "$backup/$i" ]]; then cp -a -- "$backup/$i" "${files[$i]}" || {
+      echo "Restore failed: copy $backup/$i to ${files[$i]} before reboot." >&2
+    }; fi
+  done
+  systemctl daemon-reload || true
+  echo "Backup kept at $backup. Do not reboot until configuration is checked." >&2
+  exit 1
+}
+trap rollback ERR HUP INT TERM
+for link in /etc/systemd/system/*.wants/{gdm,sddm,tarkin-console}.service /etc/systemd/system/*.requires/{gdm,sddm,tarkin-console}.service; do
+  rm -- "$link"
+done
+rm -f "$dm"
+if [[ "$mode" == xfce ]]; then
+  ln -s /usr/lib/systemd/system/sddm.service "$dm"
+  target=graphical.target
+else
+  session=terminal
+  [[ "$mode" != hyprland ]] || session=desktop
+  tmp="$(mktemp /etc/tarkin/.console.env.XXXXXX)"
+  if [[ -f /etc/tarkin/console.env ]]; then
+    sed '/^TARKIN_SESSION=/d' /etc/tarkin/console.env > "$tmp"
+  fi
+  printf 'TARKIN_SESSION=%s\n' "$session" >> "$tmp"
+  chmod 644 "$tmp"
+  mv "$tmp" /etc/tarkin/console.env
+  ln -s /etc/systemd/system/tarkin-console.service /etc/systemd/system/multi-user.target.wants/tarkin-console.service
+  target=multi-user.target
+fi
+ln -sfn "/usr/lib/systemd/system/$target" /etc/systemd/system/default.target
+printf '%s\n' "$mode" > /etc/tarkin/display-owner
+systemctl daemon-reload
+trap - ERR HUP INT TERM
+rm -rf -- "$backup"
+echo "Prepared $mode for the NEXT boot. The running display was not stopped or started."
+echo "Reboot when ready: sudo reboot"
+echo "If SDDM fails or stays black, use the offline ChromeOS recovery instructions; no automatic fallback is promised."

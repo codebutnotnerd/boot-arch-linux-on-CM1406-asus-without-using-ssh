@@ -1,0 +1,9 @@
+#!/bin/bash
+set -u
+if [[ -e /etc/systemd/system/display-manager.service || -L /etc/systemd/system/display-manager.service ]] ||
+   [[ "$(cat /etc/tarkin/display-owner 2>/dev/null)" == xfce ]] ||
+   systemctl is-active --quiet gdm.service sddm.service 2>/dev/null ||
+   systemctl is-enabled --quiet gdm.service sddm.service 2>/dev/null; then
+  echo "A display manager owns or reserves the display. Use sudo tarkin-display terminal (or hyprland), then reboot; do not start another compositor." >&2
+  exit 1
+fi

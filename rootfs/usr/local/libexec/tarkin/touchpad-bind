@@ -1,0 +1,22 @@
+#!/bin/bash
+set -u
+modprobe i2c-hid 2>/dev/null || true
+modprobe hid-multitouch 2>/dev/null || true
+mt=/sys/bus/hid/drivers/hid-multitouch
+gen=/sys/bus/hid/drivers/hid-generic
+[[ -d "$mt" ]] || { echo "touchpad-bind: hid-multitouch is not available in this kernel; leaving the touchpad as it is." >&2; exit 0; }
+for h in /sys/bus/hid/devices/*04F3:31C6*; do
+  [[ -e "$h" ]] || continue
+  id="$(basename "$h")"
+  drv=""
+  [[ -e "$h/driver" ]] && drv="$(basename "$(readlink -f "$h/driver")")"
+  [[ "$drv" == hid-multitouch ]] && continue
+  [[ -n "$drv" ]] && echo -n "$id" > "$h/driver/unbind"
+  if ! echo -n "$id" > "$mt/bind" 2>/dev/null; then
+    echo "touchpad-bind: hid-multitouch refused $id; restoring ${drv:-no driver}." >&2
+    [[ "$drv" == hid-generic && -d "$gen" ]] && echo -n "$id" > "$gen/bind"
+  else
+    echo "touchpad-bind: $id is now owned by hid-multitouch."
+  fi
+done
+exit 0

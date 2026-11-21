@@ -1,0 +1,11 @@
+*.zip
+*.tar
+*.tar.*
+*.bin
+*.pub
+report.txt
+running.dts
+stock-fit-layout.txt
+tarkin-report/
+pf/
+*.log

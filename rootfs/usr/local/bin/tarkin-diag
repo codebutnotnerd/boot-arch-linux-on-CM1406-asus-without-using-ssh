@@ -1,0 +1,116 @@
+#!/bin/bash
+set -u
+[[ $EUID -eq 0 ]] || { echo "Run it with sudo: sudo tarkin-diag" >&2; exit 1; }
+user="${SUDO_USER:-alarm}"
+home="$(getent passwd "$user" | cut -d: -f6)"
+home="${home:-/home/alarm}"
+uid="$(id -u "$user" 2>/dev/null || echo 1000)"
+out="${1:-$home/tarkin-diag-$(date +%Y%m%d-%H%M%S).txt}"
+
+section() { printf '\n==== %s ====\n' "$1"; }
+sh_() { printf '$ %s\n' "$1"; bash -c "$1" 2>&1 | head -n "${LINES_MAX:-80}"; }
+
+{
+  echo "tarkin-diag v$(cat /etc/tarkin/version 2>/dev/null || echo unknown) $(date -u +%FT%TZ)"
+  section "system"
+  sh_ 'uname -a'
+  sh_ 'cat /proc/cmdline'
+  sh_ 'tr "\0" " " < /proc/device-tree/compatible; echo'
+  sh_ 'systemctl is-system-running'
+  sh_ 'systemctl --failed --no-legend'
+  sh_ 'free -m; df -h / /var/log'
+  sh_ 'sysctl kernel.hung_task_panic kernel.panic vm.dirty_bytes vm.dirty_background_bytes'
+  sh_ 'cat /etc/tarkin/console.env'
+  sh_ 'ls /sys/fs/pstore'
+
+  section "boot check and first boot"
+  sh_ 'systemctl status tarkin-bootcheck --no-pager -n 6; cat /run/tarkin/boot-warnings 2>/dev/null'
+  sh_ 'ls -l /var/lib/tarkin/ 2>&1; cat /var/lib/tarkin/firstboot.failed /var/lib/tarkin/firstboot.reason 2>/dev/null; systemctl is-enabled tarkin-firstboot 2>&1; ls -l /etc/sudoers.d/ 2>&1'
+  LINES_MAX=40 sh_ 'tail -n 40 /var/log/tarkin-firstboot.log 2>/dev/null'
+
+  section "console and session"
+  sh_ 'systemctl status tarkin-console seatd --no-pager -n 12'
+  LINES_MAX=60 sh_ 'journalctl -u tarkin-console -b --no-pager | tail -60'
+  sh_ 'systemctl status gdm --no-pager -n 8; systemctl is-enabled gdm tarkin-console 2>&1; systemctl get-default; readlink -f /etc/systemd/system/display-manager.service 2>&1'
+  sh_ 'command -v Hyprland start-hyprland hyprland-mali labwc cage foot; pacman -Q hyprland hyprland-git aquamarine mesa libinput gdm 2>&1'
+  sh_ 'ls -l /usr/local/libexec/tarkin/'
+  sh_ 'tarkin-smooth status 2>&1'
+
+  section "hyprland"
+  latest="$(ls -dt /run/user/$uid/hypr/*/ 2>/dev/null | head -1)"
+  echo "log dir: ${latest:-none}"
+  [[ -n "$latest" && -s "${latest}hyprland.log" ]] && LINES_MAX=60 sh_ "tail -n 60 '${latest}hyprland.log'"
+  [[ -n "$latest" && -s "${latest}hyprland.log" ]] && sh_ "grep -m4 -E 'Renderer|EGL|backend' '${latest}hyprland.log'"
+  for f in $(ls -t "$home"/.cache/hyprland/hyprlandCrashReport*.txt 2>/dev/null | head -1); do
+    echo "crash report: $f"
+    LINES_MAX=50 sh_ "head -n 50 '$f'"
+  done
+  sh_ "ls -l '$home/.config/hypr/'"
+  sh_ "runuser -u $user -- env HOME=$home XDG_RUNTIME_DIR=/run/user/$uid Hyprland --verify-config 2>&1 | tail -3"
+
+  section "gpu and drm"
+  sh_ 'ls -l /dev/dri'
+  sh_ 'for c in /sys/class/drm/card*; do echo "$c -> $(readlink -f $c/device/driver 2>/dev/null)"; done'
+  sh_ 'lsmod | grep -i -E "mali|panfrost|drm|kbase|mediatek"'
+  sh_ 'ls /sys/class/misc 2>/dev/null | grep -i mali; ls -l /dev/mali* 2>&1'
+  sh_ 'ls /usr/lib/aarch64-linux-gnu/ /usr/lib 2>/dev/null | grep -i -E "mali|gbm|libEGL|libvulkan" | sort -u'
+  sh_ 'cat /etc/environment 2>/dev/null | grep -i -E "mesa|gbm|aq_|wlr"'
+  sh_ 'ls -lR /usr/local/lib/tarkin-gpu 2>&1 | head -40'
+  sh_ 'readelf -V /usr/local/lib/tarkin-gpu/mali/lib/libmali.so.0.54.1 2>/dev/null | grep -c GLIBC_ABI_DT_RELR'
+  sh_ 'cat /usr/local/bin/hyprland-mali 2>&1; ls -l /usr/share/wayland-sessions/ 2>&1'
+  sh_ 'LD_LIBRARY_PATH=/usr/local/lib/tarkin-gpu/mali/lib timeout 30 /usr/local/lib/tarkin-gpu/bin/mali-probe 3 2>&1 | grep -E "GL_RENDERER|GL_VERSION|dmabuf|FAIL"'
+  sh_ 'LD_LIBRARY_PATH=/usr/local/lib/tarkin-gpu/mali/lib LD_PRELOAD=/usr/local/lib/tarkin-gpu/lib/egl-mali-shim.so timeout 30 /usr/local/lib/tarkin-gpu/bin/shim-probe 2>&1 | tail -4'
+  [[ -x /usr/local/bin/gpuapp ]] && sh_ "runuser -u $user -- env HOME=$home XDG_RUNTIME_DIR=/run/user/$uid /usr/local/bin/gpuapp --check"
+
+  section "touchpad and input"
+  sh_ 'systemctl status tarkin-touchpad --no-pager -n 10'
+  sh_ 'tarkin-touchpad'
+  sh_ 'grep -E "Name=|Handlers=" /proc/bus/input/devices'
+
+  section "wifi"
+  sh_ 'ip -br addr'
+  sh_ 'iw dev'
+  sh_ 'wpa_cli -i wlan0 status'
+  sh_ 'resolvectl status wlan0'
+  sh_ 'getent ahosts archlinuxarm.org | head -2'
+  sh_ 'dmesg | grep -i -E "mt7925|mt79|firmware" | tail -15'
+
+  section "bluetooth"
+  sh_ 'systemctl is-active bluetooth'
+  sh_ 'rfkill list'
+  sh_ 'bluetoothctl show'
+  sh_ 'dmesg | grep -i -E "bluetooth|btusb|hci" | tail -15'
+
+  section "audio"
+  sh_ 'cat /proc/asound/cards; ls -l /proc/asound/by-id 2>/dev/null'
+  sh_ 'cat /etc/tarkin/audio.conf 2>/dev/null | grep -v "^#"'
+  as_user="runuser -u $user -- env HOME=$home XDG_RUNTIME_DIR=/run/user/$uid DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus"
+  sh_ "$as_user systemctl --user is-active pipewire wireplumber pipewire-pulse tarkin-audio"
+  sh_ "$as_user systemctl --user is-enabled tarkin-audio pipewire.socket pipewire-pulse.socket wireplumber"
+  sh_ "$as_user pactl info | head -12"
+  LINES_MAX=150 sh_ "$as_user /usr/local/bin/tarkin-audio-test --status"
+  sh_ "journalctl _SYSTEMD_USER_UNIT=tarkin-audio.service -b --no-pager | tail -n 25"
+  sh_ 'grep -A4 -i "headset jack" /proc/bus/input/devices'
+  sh_ 'dmesg | grep -i -E "snd|sound|asoc|rt5650|rt5645|mt8189" | tail -n 25'
+
+  section "battery and brightness"
+  sh_ 'for b in /sys/class/power_supply/*; do echo "$b: $(cat $b/type 2>/dev/null) $(cat $b/status 2>/dev/null) $(cat $b/capacity 2>/dev/null)"; done'
+  sh_ 'ls /sys/class/backlight/ /sys/class/leds/ 2>&1'
+  sh_ 'for b in /sys/class/backlight/*; do echo "$b: $(cat $b/brightness) / $(cat $b/max_brightness)"; done'
+
+  section "pacman and packages"
+  sh_ 'ls /var/lib/pacman/db.lck 2>&1'
+  sh_ 'tail -n 25 /var/log/pacman.log'
+
+  section "journal warnings (this boot)"
+  LINES_MAX=60 sh_ 'journalctl -b -p warning --no-pager | tail -60'
+  section "dmesg tail"
+  LINES_MAX=60 sh_ 'dmesg | tail -60'
+} 2>&1 | sed -E \
+  -e 's/([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}/xx:xx:xx:xx:xx:xx/g' \
+  -e 's/(psk|password|pass|key)=[^ ]*/\1=<redacted>/Ig' \
+  -e 's/(SSID|ssid)[: =]+.*/\1 <redacted>/' > "$out"
+
+chown "$user:$user" "$out" 2>/dev/null || true
+echo "Report written to: $out"
+echo "Wi-Fi names, passwords and MAC addresses are masked, but read it before posting it publicly."

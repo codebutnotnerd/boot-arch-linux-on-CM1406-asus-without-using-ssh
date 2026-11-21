@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""Headset jack of the CM1406 (v1.40), standard library only.
+
+  audio-jack --status            print headphone=0|1 mic=0|1 device=/dev/input/eventN (exit 2: no device)
+  audio-jack --watch CMD [ARG..] run "CMD ARG.. HP MIC" now and every time the jack state changes
+
+Everything here comes from the ChromeOS use case profile in /usr/share/alsa/ucm2/mt8189_rt5650/HiFi.conf:
+the Headphone and Mic devices name the jack input device (JackDev "mt8189_rt5650 Headset Jack") and the
+switch each one follows (JackSwitch "2" and "4"). In the Linux input API, 2 is SW_HEADPHONE_INSERT and 4 is
+SW_MICROPHONE_INSERT. The current state is read with the EVIOCGSW ioctl; changes arrive as EV_SW events.
+The user alarm can read the device because it is in the input group.
+"""
+import fcntl
+import os
+import select
+import subprocess
+import sys
+import time
+
+JACK_NAME = "mt8189_rt5650 Headset Jack"
+SW_HEADPHONE_INSERT = 2
+SW_MICROPHONE_INSERT = 4
+INPUT_EVENT_SIZE = 24
+
+
+def eviocgsw(length):
+    return (2 << 30) | (length << 16) | (ord("E") << 8) | 0x1B
+
+
+def find_device():
+    base = "/sys/class/input"
+    try:
+        entries = sorted(os.listdir(base))
+    except OSError:
+        return None
+    for entry in entries:
+        if not entry.startswith("event"):
+            continue
+        try:
+            with open(os.path.join(base, entry, "device", "name")) as f:
+                name = f.read().strip()
+        except OSError:
+            continue
+        if name == JACK_NAME:
+            return "/dev/input/" + entry
+    return None
+
+
+def read_state(fd):
+    buf = bytearray(8)
+    fcntl.ioctl(fd, eviocgsw(len(buf)), buf, True)
+
+    def bit(n):
+        return (buf[n // 8] >> (n % 8)) & 1
+
+    return bit(SW_HEADPHONE_INSERT), bit(SW_MICROPHONE_INSERT)
+
+
+def log(msg):
+    print("tarkin-audio-jack: " + msg, file=sys.stderr, flush=True)
+
+
+def status():
+    dev = find_device()
+    if dev is None:
+        print("headphone=0 mic=0 device=none")
+        return 2
+    try:
+        fd = os.open(dev, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError as e:
+        print("headphone=0 mic=0 device=%s error=%s" % (dev, e.strerror))
+        return 3
+    try:
+        hp, mic = read_state(fd)
+    finally:
+        os.close(fd)
+    print("headphone=%d mic=%d device=%s" % (hp, mic, dev))
+    return 0
+
+
+def watch(cmd):
+    dev = find_device()
+    if dev is None:
+        log("no input device named %r." % JACK_NAME)
+        return 2
+    fd = os.open(dev, os.O_RDONLY | os.O_NONBLOCK)
+    poller = select.poll()
+    poller.register(fd, select.POLLIN)
+    state = None
+    log("watching %s (%s)." % (dev, JACK_NAME))
+    while True:
+        try:
+            cur = read_state(fd)
+        except OSError as e:
+            log("cannot read the jack state: %s" % e.strerror)
+            return 1
+        if cur != state:
+            state = cur
+            log("headphone=%d mic=%d" % cur)
+            subprocess.run(cmd + [str(cur[0]), str(cur[1])])
+        for _fd, ev in poller.poll():
+            if ev & (select.POLLERR | select.POLLHUP | select.POLLNVAL):
+                log("the jack device went away.")
+                return 1
+        time.sleep(0.3)
+        while True:
+            try:
+                data = os.read(fd, INPUT_EVENT_SIZE * 64)
+            except BlockingIOError:
+                break
+            except OSError as e:
+                log("the jack device went away (%s)." % e.strerror)
+                return 1
+            if not data:
+                return 1
+
+
+def main(argv):
+    if len(argv) >= 2 and argv[1] == "--status":
+        return status()
+    if len(argv) >= 3 and argv[1] == "--watch":
+        return watch(argv[2:])
+    print(__doc__, file=sys.stderr)
+    return 64
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
