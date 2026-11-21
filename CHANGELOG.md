@@ -1,5 +1,71 @@
 # Changelog
 
+## v1.60
+
+Not tested on the CM1406 yet; the automated tests are mocks (niri 26.04 `niri validate` was run for real on the
+generated configs).
+
+New:
+
+- **No desktop at the first boot, then `tarkin-desktop`**: the first boot installs the Mali GPU stack, sound and the
+  Hyprland files (`install-hyprland.sh --no-autostart`) but starts no desktop; it restarts into the terminal, and every
+  terminal says how to choose. `tarkin-desktop` (`choose-desktop.sh`) offers niri + Vitrum Plus v10 or Hyprland with
+  the base config, also as `--niri`, `--hyprland`, `--none`, `--undo-niri`, `--status`. It can be run again to switch;
+  `--undo-niri` takes Vitrum Plus and niri out again. `scripts/install-vitrum-plus-niri-v10.sh` is in the release and
+  copied to every stick.
+- **niri**: `install-niri.sh` is the script with the EGL fix (`/usr/local/lib/tarkin-gpu/niri/lib/libEGL.so.1`, linked
+  with `-Bsymbolic`, returning its own `eglGetProcAddress`) and is copied to every stick. If niri fails, Hyprland
+  starts. Undo: `bash ~/install-niri.sh --remove`.
+- **`--wm niri|hyprland` (optional)**: no question any more at install time. `sudo bash install.sh --wm niri` (or
+  `TARKIN_WM=niri`, or `--wm hyprland`) only preselects the desktop that the first boot sets up and starts. Kept when
+  an install is resumed.
+- `install-hyprland.sh --no-autostart`: installs everything but leaves the boot on the terminal.
+- **Super+Shift+S in niri**: screenshot of a region with niri's own `screenshot` action (clipboard and
+  `~/Pictures/Screenshots`). New configs get it. An existing config gets only that line under `binds {`, after
+  `niri validate`, with a copy in `config.kdl.before-tarkin-screenshot`; `--screenshot-key` does only this step,
+  `--remove` takes it out.
+- **4-image Vulkan layer** (`install-gpuapp.sh`): the layer is built with `{ 4, 0 }` instead of `{ 2, 0 }` in
+  `wsi/wayland/surface_properties.cpp` and `SOURCE` gets `min_image_count=4`. With 2 images Firefox on the GPU froze
+  under niri; the same change by hand fixed it on the CM1406 (2026-11-21). An older layer is rebuilt on the next run
+  and kept in `layer/backup-min-images-2`; `--layer-rollback` puts it back byte for byte. A layer already fixed with
+  `fix-gpuapp-wsi-images.sh` is kept as is.
+- `install-gpuapp.sh` accepts a niri desktop on the GPU, not only Hyprland.
+
+Fixed:
+
+- `mkfs.ext4: /dev/sda2 is apparently in use by the system` on a reused stick. Before writing anything the installer
+  now checks what uses the stick: mounts (also in other mount namespaces), swap, device-mapper/LVM/RAID, and programs
+  with a file, folder or the device open (read from `/proc`, no `fuser` needed). It lists them (process number and
+  name, mount point) and stops with nothing changed. The check runs again before partitioning and before `mkfs.ext4`.
+  `umount -l` is no longer used: it hid the program that kept the partition busy. The start of each old partition
+  is zeroed before the new table is written, so ChromeOS does not mount the old `ALARM` filesystem again during the
+  table reread (`partx -u`, `partprobe` or `blockdev --rereadpt`, then `udevadm settle`). If `mkfs.ext4` still
+  refuses, the check runs once more and `mkfs.ext4` is retried once.
+- The target is also checked with `tarkin_is_safe_usb_disk` (whole USB disk, not the ChromeOS disk) and refused when
+  it holds `/`, `/usr/local`, `/home`, `/var` or the stateful partition.
+- Smooth mode that seemed to turn off by itself:
+  - under niri nothing was boosted (only `Hyprland` was clamped); niri is clamped now;
+  - the GPU floor was written once at start: if the GPU node appeared after the service, or the minimum went back down
+    later, it stayed off until the next boot. The service now waits for the node and sets the floor again (the
+    journal counts each reset);
+  - when the GPU is hot the kernel lowers the maximum and the minimum follows it; the journal and `status` now say so
+    instead of looking like smooth mode was off;
+  - `tarkin-smooth status` said "on" when the service was enabled but had stopped; it now says what runs.
+- `install-hyprland.sh` restarts a running `tarkin-smooth.service` after updating its files.
+
+Faster:
+
+- The smooth mode loop starts no program while the desktop runs (v1.50: `pgrep`, `uclampset`, `tr` and `sleep`
+  every 15 s, 16 programs a minute).
+- `install-hyprland.sh` checks the package list with one `pacman -Qq`, one `pacman -Slq` and one `pacman -Sp`
+  instead of up to three `pacman` calls per package (about 40 packages); the old per-package check stays as fallback.
+- `install-gpuapp.sh` downloads only the pinned commit of `vulkan-wsi-layer` (`git fetch --depth 1`), with the full
+  clone as fallback.
+- The boot report written 90 s after boot runs at the lowest CPU and disk priority.
+
+Tests: mocks only (a fake `/sys` and `/proc`, mocked `cgpt`, `mkfs.ext4`, `umount` and the first boot; no real
+disk). `tests/test_v150.py` now reads the version from `VERSION`.
+
 ## v1.50
 
 Not tested on the CM1406 yet; the automated tests are mocks.

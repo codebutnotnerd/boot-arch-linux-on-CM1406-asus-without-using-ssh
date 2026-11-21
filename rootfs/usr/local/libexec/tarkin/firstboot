@@ -15,8 +15,11 @@ MAX_ATTEMPTS=3
 
 FIRSTBOOT_ARGS=""
 FIRSTBOOT_REBOOT=1
+FIRSTBOOT_WM=""
 # shellcheck disable=SC1090
 [[ -r "$CONF" ]] && . "$CONF"
+RETRY="bash ~/install-hyprland.sh --no-autostart"
+[[ "$FIRSTBOOT_WM" != hyprland ]] || RETRY="bash ~/install-hyprland.sh"
 
 touch "$LOG" && chmod 644 "$LOG"
 exec > >(tee -a "$LOG") 2>&1
@@ -56,9 +59,13 @@ uid="$(id -u "$USER_NAME" 2>/dev/null)" ||
 home="$(getent passwd "$USER_NAME" | cut -d: -f6)"
 script="$home/install-hyprland.sh"
 [[ -f "$script" ]] ||
-  stop_early "finding install-hyprland.sh" "$script is missing" "copy install-hyprland.sh and rootfs/ from the release to $home, then: bash ~/install-hyprland.sh"
+  stop_early "finding install-hyprland.sh" "$script is missing" "copy install-hyprland.sh and rootfs/ from the release to $home, then: $RETRY"
 
-log "Hyprland + Mali GPU + sound for $USER_NAME: starting."
+case "$FIRSTBOOT_WM" in
+  hyprland) log "Mali GPU + sound + Hyprland (chosen at install time) for $USER_NAME: starting." ;;
+  niri) log "Mali GPU + sound, then niri + Vitrum Plus (chosen at install time) for $USER_NAME: starting." ;;
+  *) FIRSTBOOT_WM=""; log "Mali GPU + sound for $USER_NAME: starting. No desktop starts until one is chosen (tarkin-desktop)." ;;
+esac
 
 waited=0
 until getent hosts mirror.archlinuxarm.org >/dev/null 2>&1; do
@@ -100,7 +107,7 @@ remove_sudo_rule
 chmod 440 "$SUDOERS.tmp"
 if ! visudo -cf "$SUDOERS.tmp" >/dev/null 2>&1; then
   remove_sudo_rule
-  stop_early "temporary sudo rule" "the temporary sudo rule does not parse" "check sudo: sudo visudo -c, then: bash ~/install-hyprland.sh"
+  stop_early "temporary sudo rule" "the temporary sudo rule does not parse" "check sudo: sudo visudo -c, then: $RETRY"
 fi
 mv -f "$SUDOERS.tmp" "$SUDOERS"
 
@@ -109,6 +116,7 @@ rm -f "$STEP_FILE" "$REASON"
 chown "$USER_NAME" "$STEP_FILE" 2>/dev/null || chmod 666 "$STEP_FILE"
 
 read -r -a extra <<< "$FIRSTBOOT_ARGS"
+[[ "$FIRSTBOOT_WM" == hyprland ]] || extra+=(--no-autostart)
 log "running: $script ${extra[*]:-} (as $USER_NAME)"
 cd "$home" || exit 1
 rc=0
@@ -118,6 +126,33 @@ runuser -u "$USER_NAME" -- env -i \
   XDG_RUNTIME_DIR="/run/user/$uid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
   TARKIN_FIRSTBOOT=1 TARKIN_STEP_FILE="$STEP_FILE" \
   bash "$script" ${extra[@]+"${extra[@]}"} </dev/null || rc=$?
+
+set_session_desktop() {
+  local env="$ROOT/etc/tarkin/console.env" tmp
+  tmp="$(mktemp "$env.XXXXXX")" || return 1
+  sed '/^TARKIN_SESSION=/d' "$env" > "$tmp" 2>/dev/null || true
+  printf 'TARKIN_SESSION=desktop\n' >> "$tmp"
+  chmod 644 "$tmp" && mv -f "$tmp" "$env"
+}
+
+WM_STARTED="the terminal (choose a desktop with: tarkin-desktop)"
+[[ "$FIRSTBOOT_WM" != hyprland ]] || WM_STARTED=Hyprland
+if (( rc == 0 )) && [[ "$FIRSTBOOT_WM" == niri ]]; then
+  nrc=0
+  log "niri + Vitrum Plus were chosen: running tarkin-desktop --niri (as $USER_NAME)"
+  runuser -u "$USER_NAME" -- env -i \
+    HOME="$home" USER="$USER_NAME" LOGNAME="$USER_NAME" SHELL=/bin/bash LANG=C.UTF-8 TERM=dumb \
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/bin \
+    XDG_RUNTIME_DIR="/run/user/$uid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+    "$ROOT/usr/local/bin/tarkin-desktop" --niri --firstboot </dev/null || nrc=$?
+  if (( nrc == 0 )) && set_session_desktop; then
+    WM_STARTED="niri + Vitrum Plus"
+    log "niri + Vitrum Plus start at boot. Other choice later: tarkin-desktop"
+  else
+    log "niri + Vitrum Plus could not be set up (code $nrc); no desktop starts. Later, as alarm: tarkin-desktop --niri"
+    tell_terminals "niri + Vitrum Plus could not be set up; the terminal stays. Later: tarkin-desktop --niri (details: /var/log/tarkin-firstboot.log)"
+  fi
+fi
 remove_sudo_rule
 
 if (( rc == 0 )); then
@@ -125,11 +160,11 @@ if (( rc == 0 )); then
   date -u +%FT%TZ > "$DONE"
   systemctl disable tarkin-firstboot.service >/dev/null 2>&1 \
     || rm -f "$ROOT/etc/systemd/system/multi-user.target.wants/tarkin-firstboot.service"
-  log "done: Hyprland, the Mali GPU stack and sound are installed."
+  log "done: the Mali GPU stack, sound and Hyprland files are installed."
   sync
   if [[ "$FIRSTBOOT_REBOOT" == 1 ]]; then
-    log "restarting in 20 seconds to start Hyprland on a clean system."
-    tell_terminals "First-boot setup finished. The machine restarts into Hyprland in 20 seconds."
+    log "restarting in 20 seconds to start $WM_STARTED on a clean system."
+    tell_terminals "First-boot setup finished. The machine restarts into $WM_STARTED in 20 seconds."
     sleep 20
     systemctl reboot
   else
@@ -147,8 +182,8 @@ if (( n >= MAX_ATTEMPTS )); then
   rm -f "$PENDING"
   systemctl disable tarkin-firstboot.service >/dev/null 2>&1 || true
   log "$MAX_ATTEMPTS attempts failed: automatic retries stop here."
-  write_reason "$step" "$reason" "fix the cause above, then in the terminal as alarm (not with sudo): bash ~/install-hyprland.sh"
+  write_reason "$step" "$reason" "fix the cause above, then in the terminal as alarm (not with sudo): $RETRY"
 else
-  write_reason "$step" "$reason" "fix the cause above, then: sudo systemctl restart tarkin-firstboot (or reboot; or by hand as alarm, not with sudo: bash ~/install-hyprland.sh)"
+  write_reason "$step" "$reason" "fix the cause above, then: sudo systemctl restart tarkin-firstboot (or reboot; or by hand as alarm, not with sudo: $RETRY)"
 fi
 exit 1

@@ -10,7 +10,7 @@ Usage: sudo tarkin-smooth on|off
        tarkin-smooth status
 
 Smooth mode keeps the GPU at 526 MHz or more (factory minimum: 390 MHz) and
-keeps Hyprland on the fast CPU cores. It uses a little more power.
+keeps the desktop (Hyprland or niri) on the fast CPU cores. It uses a little more power.
 "on" applies it now and at every boot; "off" removes it and restores the
 factory values.
 USAGE_EOF
@@ -21,19 +21,37 @@ need_root() {
 }
 
 show_status() {
-  local d enabled active
+  local d enabled active state min max cur
   enabled="$(systemctl is-enabled "$UNIT" 2>/dev/null)"
   active="$(systemctl is-active "$UNIT" 2>/dev/null)"
-  echo "smooth mode: $([[ "$enabled" == enabled ]] && echo on || echo off) (service ${enabled:-unknown}, ${active:-unknown})"
+  state=off
+  if [[ "$enabled" == enabled && "$active" == active ]]; then
+    state=on
+  elif [[ "$enabled" == enabled ]]; then
+    state="on at boot, but the service is ${active:-unknown} now (see: sudo journalctl -u $UNIT -b -n 40 --no-pager)"
+  elif [[ "$active" == active ]]; then
+    state="on until the next boot (service not enabled)"
+  fi
+  echo "smooth mode: $state (service ${enabled:-unknown}, ${active:-unknown})"
   for d in "$SYS/class/devfreq/13000000.gpu" "$SYS"/class/devfreq/*gpu* "$SYS"/class/devfreq/*mali*; do
     [[ -f "$d/min_freq" ]] || continue
-    echo "GPU ${d##*/}: min $(cat "$d/min_freq") Hz, now $(cat "$d/cur_freq" 2>/dev/null || echo ?) Hz, max $(cat "$d/max_freq" 2>/dev/null || echo ?) Hz"
+    min="$(cat "$d/min_freq" 2>/dev/null || echo ?)"
+    max="$(cat "$d/max_freq" 2>/dev/null || echo ?)"
+    cur="$(cat "$d/cur_freq" 2>/dev/null || echo ?)"
+    echo "GPU ${d##*/}: min $min Hz, now $cur Hz, max $max Hz"
+    if [[ "$state" == on && "$max" =~ ^[0-9]+$ ]] && (( max < 526000000 )); then
+      echo "GPU maximum is below 526 MHz now (temperature limit): the floor comes back when it cools down."
+    elif [[ "$state" == on && "$min" =~ ^[0-9]+$ ]] && (( min < 526000000 )); then
+      echo "GPU minimum is below 526 MHz: the service sets it again within 15 s."
+    fi
     break
   done
   if command -v uclampset >/dev/null 2>&1 && command -v pgrep >/dev/null 2>&1; then
-    local pid
-    for pid in $(pgrep -x Hyprland); do
-      echo "Hyprland $pid: $(uclampset -p "$pid" 2>/dev/null | tr '\n' ' ')"
+    local pid name
+    for name in Hyprland niri; do
+      for pid in $(pgrep -x "$name"); do
+        echo "$name $pid: $(uclampset -p "$pid" 2>/dev/null | tr '\n' ' ')"
+      done
     done
   fi
 }
@@ -41,7 +59,7 @@ show_status() {
 case "${1:-}" in
   on)
     need_root on
-    [[ -x "$HELPER" ]] || { echo "tarkin-smooth: $HELPER is missing; run install-hyprland.sh from the v1.50 release tree." >&2; exit 1; }
+    [[ -x "$HELPER" ]] || { echo "tarkin-smooth: $HELPER is missing; run install-hyprland.sh from the v1.60 release tree." >&2; exit 1; }
     systemctl daemon-reload
     systemctl enable "$UNIT" || { echo "tarkin-smooth: cannot enable $UNIT." >&2; exit 1; }
     systemctl restart "$UNIT" || { echo "tarkin-smooth: $UNIT does not start; see: journalctl -u $UNIT -b" >&2; exit 1; }

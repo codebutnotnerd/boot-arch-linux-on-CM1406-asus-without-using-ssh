@@ -19,7 +19,7 @@ on_error() {
 
 usage() {
 cat <<'USAGE_EOF'
-Usage: bash install-hyprland.sh [options]          (boot-arch-linux-on-CM1406 v1.50)
+Usage: bash install-hyprland.sh [options]          (boot-arch-linux-on-CM1406 v1.60)
 
 Installs Hyprland and makes it render on the Mali-G57 GPU with the ChromeOS
 libmali and a small EGL shim, instead of falling back to the CPU.
@@ -39,6 +39,8 @@ Options:
                    Refused while XFCE/SDDM or another display manager owns
                    the next boot (sudo tarkin-display hyprland, reboot first).
   --no-packages    Skip the pacman step (packages are assumed to be installed).
+  --no-autostart   Install everything but keep the boot on the terminal: no
+                   desktop starts until one is chosen with tarkin-desktop.
   --reset-config   Back up and rewrite ~/.config/hypr/hyprland.lua even when it is valid.
   --mali-source P  Path to a known working libmali.so copied from ChromeOS.
                    Without it the script looks in /usr/local/lib/tarkin-gpu,
@@ -78,6 +80,7 @@ SKIP_GPU_TEST=0
 REMOVE=0
 PURGE_GPU=0
 WITH_GDM=0
+NO_AUTOSTART=0
 MALI_SRC=""
 
 while [[ $# -gt 0 ]]; do
@@ -94,6 +97,7 @@ while [[ $# -gt 0 ]]; do
     --remove) REMOVE=1 ;;
     --purge-gpu) PURGE_GPU=1 ;;
     --with-gdm) WITH_GDM=1 ;;
+    --no-autostart) NO_AUTOSTART=1 ;;
     -h|--help) usage; exit 0 ;;
     *) die "Unknown option: $1 (use --help)" ;;
   esac
@@ -103,6 +107,7 @@ done
 (( PURGE_GPU == 0 || REMOVE == 1 )) || die "--purge-gpu must be used together with --remove."
 (( CONFIG_ONLY == 0 || GPU_ONLY == 0 )) || die "--config-only and --gpu-only are mutually exclusive."
 (( WITH_GDM == 0 || (GPU_ONLY == 0 && CONFIG_ONLY == 0 && REMOVE == 0) )) || die "--with-gdm cannot be combined with --gpu-only, --config-only or --remove."
+(( NO_AUTOSTART == 0 || WITH_GDM == 0 )) || die "--no-autostart cannot be combined with --with-gdm."
 
 if [[ $EUID -eq 0 && -z "${TARKIN_PREFIX:-}" ]]; then
   echo "[-] Do not run this with sudo. Run it as your user: bash install-hyprland.sh (it asks for the sudo password itself)." >&2
@@ -184,6 +189,19 @@ check_environment() {
   fi
 }
 
+installable() {
+  local half
+  if pacman -Sp --print-format '%n' "$@" </dev/null >/dev/null 2>&1; then
+    avail+=("$@")
+  elif (( $# == 1 )); then
+    warn "$1 has dependencies that cannot be installed on this architecture (skipped)."
+  else
+    half=$(( $# / 2 ))
+    installable "${@:1:half}"
+    installable "${@:half+1}"
+  fi
+}
+
 install_packages() {
   command -v pacman >/dev/null 2>&1 || die "pacman not found: this must run inside the Arch system."
   getent hosts mirror.archlinuxarm.org >/dev/null 2>&1 || die "No network (cannot resolve mirror.archlinuxarm.org). Connect first: sudo tarkin-wifi \"NetworkName\"."
@@ -192,27 +210,41 @@ install_packages() {
   (( free_kb >= 3145728 )) || die "Only $((free_kb / 1024)) MiB free on / (GNOME + Hyprland need about 3 GiB). Free some space with: sudo pacman -Scc"
   info "Refreshing the package database and upgrading the system (the ChromeOS kernel packages are ignored; this can take a while)..."
   sys pacman -Syu --noconfirm --noprogressbar --ignore linux-aarch64,linux-aarch64-headers
-  local want=() avail=() p
+  local want=() avail=() p installed synced
+  installed=" $({ pacman -Qq 2>/dev/null || true; } | tr '\n' ' ') "
+  synced=" $({ pacman -Slq 2>/dev/null || true; } | tr '\n' ' ') "
   local base=(hyprland xdg-desktop-portal-hyprland gcc libglvnd mesa libc++ libc++abi libdrm python-pip)
   local apps=(waybar fuzzel swaybg mako foot cage brightnessctl papirus-icon-theme adw-gtk-theme inter-font noto-fonts noto-fonts-emoji pcmanfm)
   local audio=(pipewire wireplumber pipewire-pulse libpulse alsa-utils alsa-ucm-conf python bluez bluez-utils blueman pavucontrol hypridle swaylock)
   for p in "${base[@]}" "${apps[@]}" "${audio[@]}"; do
-    if [[ "$p" == pipewire-pulse ]] && pacman -Q pulseaudio >/dev/null 2>&1; then
+    if [[ "$p" == pipewire-pulse && "$installed" == *" pulseaudio "* ]]; then
       warn "pulseaudio is installed, so pipewire-pulse is skipped (browsers may stay silent). Replace it with: sudo pacman -S pipewire-pulse (answer y to remove pulseaudio)."
       continue
     fi
-    if ! pacman -Q "$p" >/dev/null 2>&1; then
+    if [[ "$installed" != *" $p "* ]]; then
       want+=("$p")
     fi
   done
   local gnome_core=(gnome-shell gnome-session gnome-settings-daemon gnome-control-center gdm gnome-keyring xdg-desktop-portal-gnome xdg-user-dirs-gtk gnome-backgrounds gnome-menus)
   local gnome_apps=(nautilus gnome-console gnome-text-editor gnome-system-monitor gnome-disk-utility gnome-calculator gnome-font-viewer gvfs loupe)
   for p in "${gnome_core[@]}" "${gnome_apps[@]}"; do
-    if ! pacman -Q "$p" >/dev/null 2>&1; then
+    if [[ "$installed" != *" $p "* ]]; then
       want+=("$p")
     fi
   done
+  local cand=()
   for p in "${want[@]}"; do
+    if [[ "$synced" == "  " || "$synced" == *" $p "* ]]; then
+      cand+=("$p")
+    else
+      warn "$p is not available for this architecture (skipped)."
+    fi
+  done
+  if (( ${#cand[@]} )) && [[ "$synced" != "  " ]]; then
+    installable "${cand[@]}"
+    cand=()
+  fi
+  for p in "${cand[@]}"; do
     if ! pacman -Si "$p" >/dev/null 2>&1; then
       warn "$p is not available for this architecture (skipped)."
     elif ! pacman -Sp --print-format '%n' "$p" </dev/null >/dev/null 2>&1; then
@@ -1155,18 +1187,23 @@ install_comfort_files() {
     usr/local/libexec/tarkin/smooth
     etc/systemd/system/tarkin-smooth.service
   )
-  local f mode
+  local f mode smooth_changed=0
   for f in "${extras[@]}"; do
     mode=644
     case "$f" in usr/local/bin/*|usr/local/libexec/*) mode=755 ;; esac
     if [[ "$source_dir" == / ]]; then
-      [[ -e "/$f" ]] || warn "Missing /$f (optional, v1.50). Run install-hyprland.sh from the complete v1.50 release tree to get it."
+      [[ -e "/$f" ]] || warn "Missing /$f (optional, v1.50). Run install-hyprland.sh from the complete v1.60 release tree to get it."
     elif [[ ! -f "$source_dir/$f" ]]; then
       warn "Missing $source_dir/$f (optional); skipped."
     elif [[ ! -e "$PREFIX/$f" ]] || ! cmp -s "$source_dir/$f" "$PREFIX/$f"; then
       sys install -D -m "$mode" "$source_dir/$f" "$PREFIX/$f"
+      [[ "$f" == */smooth* || "$f" == */tarkin-smooth.service ]] && smooth_changed=1
     fi
   done
+  if (( smooth_changed )) && [[ -z "$PREFIX" ]] && systemctl is-active --quiet tarkin-smooth.service 2>/dev/null; then
+    sys systemctl daemon-reload || true
+    sys systemctl try-restart tarkin-smooth.service || warn "Could not restart tarkin-smooth.service; the new smooth mode starts at the next boot."
+  fi
   local files=(
     usr/local/bin/tarkin-lock
     usr/local/bin/tarkin-dpms
@@ -1575,9 +1612,14 @@ enable_console_display() {
     rm -f "$tmp"
     ok "GDM disabled for the next boot (stick made before v1.40; the running screen is not stopped). GNOME stays installed."
   fi
-  set_console_session_desktop
   sys systemctl enable tarkin-console.service
   sys systemctl set-default multi-user.target
+  if (( NO_AUTOSTART )); then
+    ok "tarkin-console.service enabled: the boot stays on the terminal until a desktop is chosen (tarkin-desktop)."
+    DISPLAY_MODE=terminal
+    return 0
+  fi
+  set_console_session_desktop
   ok "tarkin-console.service enabled: Hyprland (Mali GPU) starts by itself at boot."
   DISPLAY_MODE=console
 }
@@ -1794,6 +1836,13 @@ main() {
     echo "      3. Check the sound with: tarkin-audio-test"
     echo "      4. Terminal only, from the next boot: sudo tarkin-display terminal (back: sudo tarkin-display hyprland)"
     echo "      5. Optional smooth mode: sudo tarkin-smooth on   (undo: sudo tarkin-smooth off)"
+  elif [[ -z "$PREFIX" && "$DISPLAY_MODE" == "terminal" ]]; then
+    echo "    Display   : tarkin-console, terminal only (no desktop starts yet)"
+    echo
+    echo "    Next:"
+    echo "      1. Choose the desktop: tarkin-desktop   (niri + Vitrum Plus, or Hyprland)"
+    echo "      2. Check the GPU afterwards with: tarkin-gpu-check (or sudo tarkin-diag)"
+    echo "      3. Check the sound with: tarkin-audio-test"
   elif [[ -z "$PREFIX" ]]; then
     echo "    Display   : GDM (GNOME is untouched; tarkin-console is disabled)"
     echo

@@ -110,7 +110,7 @@ class SmoothMode(Base):
         (self.gpu / "max_freq").write_text("1100000000\n")
         (self.gpu / "cur_freq").write_text("390000000\n")
         self.state = self.path / "state"
-        self.mock("pgrep", '#!/bin/bash\n[[ "$*" == "-x Hyprland" ]] && echo 4242\n')
+        self.mock("pgrep", '#!/bin/bash\n[[ "$*" == "-x Hyprland" || "$*" == "-x Hyprland|niri" ]] && echo 4242\n')
         self.mock("uclampset", '#!/bin/bash\necho "uclampset $*" >> "$CALLS"\n[[ "$*" == "-p 4242" ]] && echo "current util clamp for pid 4242 is: 512:1024"\nexit "${UCLAMP_RC:-0}"\n')
         self.mock("systemctl", '#!/bin/bash\necho "systemctl $*" >> "$CALLS"\ncase "$1" in is-enabled) echo disabled; exit 1 ;; is-active) echo inactive; exit 3 ;; esac\n')
         self.env |= {"TARKIN_SYSFS": str(self.sys), "TARKIN_SMOOTH_STATE": str(self.state)}
@@ -495,9 +495,10 @@ class FirstBoot(Installer):
 
 class Release(unittest.TestCase):
     def test_version(self):
-        self.assertEqual((ROOT / "VERSION").read_text().strip(), "1.50")
+        version = (ROOT / "VERSION").read_text().strip()
+        self.assertRegex(version, r"^1\.[5-9]\d$")
         for name in ("install-hyprland.sh", "install-gpuapp.sh"):
-            self.assertIn("(boot-arch-linux-on-CM1406 v1.50)", (ROOT / name).read_text())
+            self.assertIn("(boot-arch-linux-on-CM1406 v%s)" % version, (ROOT / name).read_text())
         self.assertIn("## v1.50", (ROOT / "CHANGELOG.md").read_text())
 
     def test_new_files_have_no_comments(self):

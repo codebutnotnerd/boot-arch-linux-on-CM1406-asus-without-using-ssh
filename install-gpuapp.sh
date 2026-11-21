@@ -1,10 +1,4 @@
 #!/bin/bash
-# Third-party code:
-#  - vulkan-wsi-layer, (c) Arm Limited and contributors, MIT licence, cloned at install time from
-#    https://gitlab.freedesktop.org/mesa/vulkan-wsi-layer at the commit pinned in WSI_COMMIT.
-#  - The patch embedded at the end of this file is port/quigon/patches/vulkan-wsi-layer-quigon.patch from
-#    https://github.com/zoan37/lenovo-slim3-chromebook-omarchy (commit 27ba99f), Copyright (c) 2026 zoan37,
-#    MIT licence (see LICENSE). It is unmodified and checked by SHA-256 before use.
 set -euo pipefail
 
 die()  { echo "[-] $*" >&2; exit 1; }
@@ -14,7 +8,7 @@ ok()   { echo "[+] $*"; }
 
 usage() {
 cat <<'USAGE_EOF'
-Usage: bash install-gpuapp.sh [options]            (boot-arch-linux-on-CM1406 v1.50)
+Usage: bash install-gpuapp.sh [options]            (boot-arch-linux-on-CM1406 v1.60)
 
 Optional. Installs `gpuapp`, a command that runs one program on the Mali-G57 GPU
 (Mesa Zink on the Vulkan driver of the ChromeOS libmali) instead of the CPU:
@@ -30,6 +24,7 @@ Options:
   --check      Verify the installation (read-only), then run `gpuapp --check`.
   --remove     Remove everything this script installed (packages are kept).
   --rebuild    Compile the Vulkan Wayland layer again even when it is already installed.
+  --layer-rollback  Put back the layer that was replaced by the 4-image layer (exact copy).
   --dry-run    Show what would be done; change nothing.
   -h, --help   Show this help.
 
@@ -53,6 +48,7 @@ DRY_RUN=0
 REMOVE=0
 CHECK=0
 REBUILD=0
+LAYER_ROLLBACK=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -60,6 +56,7 @@ while [[ $# -gt 0 ]]; do
     --remove) REMOVE=1 ;;
     --check|--verify) CHECK=1 ;;
     --rebuild) REBUILD=1 ;;
+    --layer-rollback) LAYER_ROLLBACK=1 ;;
     -h|--help) usage; exit 0 ;;
     *) die "Unknown option: $1 (use --help)" ;;
   esac
@@ -68,6 +65,7 @@ done
 
 (( REMOVE + CHECK <= 1 )) || die "--remove and --check are mutually exclusive."
 (( REBUILD == 0 || (REMOVE == 0 && CHECK == 0) )) || die "--rebuild cannot be combined with --remove or --check."
+(( LAYER_ROLLBACK == 0 || (REMOVE == 0 && CHECK == 0 && REBUILD == 0) )) || die "--layer-rollback cannot be combined with other options."
 
 if [[ $EUID -eq 0 && -z "${TARKIN_PREFIX:-}" ]]; then
   echo "[-] Do not run this with sudo. Run it as your user: bash install-gpuapp.sh (it asks for the sudo password itself)." >&2
@@ -91,6 +89,7 @@ LAYER_DIR="$VK_ROOT/layer"
 LAYER_SO="libVkLayer_window_system_integration.so"
 LAYER_JSON="VkLayer_window_system_integration.json"
 STAMP="$LAYER_DIR/SOURCE"
+LAYER_BACKUP="$LAYER_DIR/backup-min-images-2"
 GPUAPP="$PREFIX/usr/local/bin/gpuapp"
 UDEV_RULE="$PREFIX/etc/udev/rules.d/70-tarkin-dma-heap.rules"
 APPS_DIR="$PREFIX/usr/local/share/applications"
@@ -101,6 +100,10 @@ PROC_ROOT="${TARKIN_PROC_ROOT:-/proc}"
 WSI_REPO="https://gitlab.freedesktop.org/mesa/vulkan-wsi-layer.git"
 WSI_COMMIT="f5148d4f8c541f8aeddc88170b9e2dbbea2e8b43"
 WSI_PATCH_SHA256="f4ae1ba7a575e1bfac06120f52f404d932d9c955b309539912483e295b3f82db"
+WSI_IMAGES_FILE="wsi/wayland/surface_properties.cpp"
+WSI_IMAGES_OLD="surface_properties_override_params override_params = { 2, 0 };"
+WSI_IMAGES_NEW="surface_properties_override_params override_params = { 4, 0 };"
+WSI_IMAGES_MARK="min_image_count=4"
 PACKAGES=(vulkan-icd-loader vulkan-tools mesa-utils wayland-utils git cmake gcc make pkgconf vulkan-headers wayland-protocols libdrm)
 
 WORK_TMP=""
@@ -143,7 +146,7 @@ check_libmali() {
 
 desktop_on_gpu() {
   local pid
-  for pid in $(pgrep -x Hyprland -u "$(id -u)" 2>/dev/null); do
+  for pid in $(pgrep -x 'Hyprland|niri' -u "$(id -u)" 2>/dev/null); do
     if grep -q 'libmali' "$PROC_ROOT/$pid/maps" 2>/dev/null; then
       return 0
     fi
@@ -163,8 +166,8 @@ check_desktop_gpu() {
     warn "$BIN_DIR/mali-probe is missing: probe skipped (it comes with install-hyprland.sh)."
   fi
   desktop_on_gpu ||
-    die "The desktop is not on the GPU: no running Hyprland of this user has libmali loaded. Start Hyprland (Mali GPU) first (sudo tarkin-display hyprland, sudo reboot, then tarkin-gpu-check) and run this script from a terminal of that desktop. Nothing was installed."
-  ok "Hyprland is running on the Mali GPU"
+    die "The desktop is not on the GPU: no running Hyprland or niri of this user has libmali loaded. Start Hyprland (Mali GPU) first (sudo tarkin-display hyprland, sudo reboot, then tarkin-gpu-check) and run this script from a terminal of that desktop. Nothing was installed."
+  ok "The desktop (Hyprland or niri) is running on the Mali GPU"
 }
 
 install_packages() {
@@ -215,7 +218,24 @@ check_vulkan_driver() {
 
 layer_is_current() {
   [[ -f "$LAYER_DIR/$LAYER_SO" && -f "$LAYER_DIR/$LAYER_JSON" && -f "$STAMP" ]] &&
-    grep -qx "commit=$WSI_COMMIT" "$STAMP" && grep -qx "patch_sha256=$WSI_PATCH_SHA256" "$STAMP"
+    grep -qx "commit=$WSI_COMMIT" "$STAMP" && grep -qx "patch_sha256=$WSI_PATCH_SHA256" "$STAMP" &&
+    grep -qx "$WSI_IMAGES_MARK" "$STAMP"
+}
+
+layer_needs_images_fix() {
+  [[ -f "$LAYER_DIR/$LAYER_SO" && -f "$LAYER_DIR/$LAYER_JSON" && -f "$STAMP" ]] &&
+    grep -qx "commit=$WSI_COMMIT" "$STAMP" && grep -qx "patch_sha256=$WSI_PATCH_SHA256" "$STAMP" &&
+    ! grep -qx "$WSI_IMAGES_MARK" "$STAMP"
+}
+
+fetch_wsi() {
+  local src="$1"
+  if git init -q "$src" && git -C "$src" fetch -q --depth 1 "$WSI_REPO" "$WSI_COMMIT" && git -C "$src" checkout -q FETCH_HEAD; then
+    return 0
+  fi
+  echo "Shallow fetch refused; cloning the whole repository."
+  rm -rf -- "$src"
+  git clone "$WSI_REPO" "$src" && git -C "$src" checkout -q "$WSI_COMMIT"
 }
 
 build_layer() {
@@ -226,10 +246,12 @@ build_layer() {
   info "Downloading vulkan-wsi-layer (commit ${WSI_COMMIT:0:7}) and compiling it as $(id -un); this takes a few minutes..."
   jobs="$(nproc 2>/dev/null || echo 2)"
   if ! {
-    git clone "$WSI_REPO" "$src" &&
-    git -C "$src" checkout -q "$WSI_COMMIT" &&
+    fetch_wsi "$src" &&
     head="$(git -C "$src" rev-parse HEAD)" && [[ "$head" == "$WSI_COMMIT" ]] &&
     git -C "$src" apply "$WORK_TMP/vulkan-wsi-layer-quigon.patch" &&
+    [[ "$(grep -cF "$WSI_IMAGES_OLD" "$src/$WSI_IMAGES_FILE")" == 1 ]] &&
+    sed -i "s/override_params = { 2, 0 };/override_params = { 4, 0 };/" "$src/$WSI_IMAGES_FILE" &&
+    [[ "$(grep -cF "$WSI_IMAGES_NEW" "$src/$WSI_IMAGES_FILE")" == 1 ]] &&
     sed -i 's/ -Werror//g' "$src/CMakeLists.txt" &&
     ( cd "$src" && cmake . -Bbuild -DCMAKE_BUILD_TYPE=Release -DBUILD_WSI_HEADLESS=1 -DBUILD_WSI_WAYLAND=1 \
         -DSELECT_EXTERNAL_ALLOCATOR=dma_buf_heaps -DWSIALLOC_MEMORY_HEAP_NAME=system -DKERNEL_HEADER_DIR=/usr/include ) &&
@@ -241,7 +263,7 @@ build_layer() {
   fi
   [[ -s "$src/build/$LAYER_SO" && -s "$src/build/$LAYER_JSON" ]] ||
     die "The build did not produce $LAYER_SO and $LAYER_JSON. Nothing was installed."
-  ok "vulkan-wsi-layer compiled"
+  ok "vulkan-wsi-layer compiled (4 swapchain images on Wayland)"
 }
 
 write_stamp() {
@@ -251,6 +273,7 @@ commit=$WSI_COMMIT
 patch=vulkan-wsi-layer-quigon.patch (zoan37/lenovo-slim3-chromebook-omarchy 27ba99f, MIT)
 patch_sha256=$WSI_PATCH_SHA256
 licence=MIT (Arm Limited and contributors; patch Copyright (c) 2026 zoan37)
+$WSI_IMAGES_MARK
 STAMP_EOF
 }
 
@@ -420,6 +443,11 @@ install_files() {
   sys install -d -m 755 "$VK_ROOT" "$LAYER_DIR"
   sys install -m 644 "$d/mali_icd.json" "$ICD"
   if [[ -n "$built" ]]; then
+    if layer_needs_images_fix && [[ ! -e "$LAYER_BACKUP" ]]; then
+      sys install -d -m 755 "$LAYER_BACKUP"
+      sys cp -p "$LAYER_DIR/$LAYER_SO" "$LAYER_DIR/$LAYER_JSON" "$STAMP" "$LAYER_BACKUP/"
+      ok "Backup of the 2-image layer: $LAYER_BACKUP (undo: bash ~/install-gpuapp.sh --layer-rollback)"
+    fi
     sys install -m 755 "$built/$LAYER_SO" "$LAYER_DIR/$LAYER_SO"
     sys install -m 644 "$built/$LAYER_JSON" "$LAYER_DIR/$LAYER_JSON"
     sys install -m 644 "$WORK_TMP/vulkan-wsi-layer-quigon.patch" "$LAYER_DIR/vulkan-wsi-layer-quigon.patch"
@@ -436,6 +464,21 @@ install_files() {
     sys rm -f "$FIREFOX_DESKTOP"
     info "Firefox is not installed: no \"Firefox (GPU)\" menu entry. Run this script again after installing it."
   fi
+}
+
+layer_rollback() {
+  [[ -f "$LAYER_BACKUP/$LAYER_SO" && -f "$LAYER_BACKUP/$LAYER_JSON" && -f "$LAYER_BACKUP/SOURCE" ]] ||
+    die "No complete backup in $LAYER_BACKUP. Nothing was changed."
+  if (( DRY_RUN )); then
+    echo "   [dry-run] restore $LAYER_SO, $LAYER_JSON and SOURCE from $LAYER_BACKUP, then remove it"
+    return 0
+  fi
+  sys install -m 755 "$LAYER_BACKUP/$LAYER_SO" "$LAYER_DIR/$LAYER_SO"
+  sys install -m 644 "$LAYER_BACKUP/$LAYER_JSON" "$LAYER_DIR/$LAYER_JSON"
+  sys install -m 644 "$LAYER_BACKUP/SOURCE" "$STAMP"
+  sys rm -rf -- "$LAYER_BACKUP"
+  ok "Previous layer restored (2 swapchain images). Restart the GPU programs (Firefox GPU)."
+  echo "    Firefox GPU can freeze again with this layer. Back to 4 images: bash ~/install-gpuapp.sh"
 }
 
 remove_files() {
@@ -465,7 +508,11 @@ verify_install() {
     if [[ -e "$f" ]]; then echo "  [ok]   $f"; else echo "  [no]   $f is missing"; bad=1; fi
   done
   if [[ -f "$STAMP" ]] && ! layer_is_current; then
-    echo "  [no]   the installed layer is not the version this script builds; run: bash ~/install-gpuapp.sh --rebuild"; bad=1
+    if layer_needs_images_fix; then
+      echo "  [no]   the installed layer uses 2 swapchain images (Firefox GPU can freeze); run: bash ~/install-gpuapp.sh"; bad=1
+    else
+      echo "  [no]   the installed layer is not the version this script builds; run: bash ~/install-gpuapp.sh --rebuild"; bad=1
+    fi
   fi
   if [[ -e "$FIREFOX_DESKTOP" ]]; then echo "  [ok]   $FIREFOX_DESKTOP"; else echo "  [..]   no \"Firefox (GPU)\" menu entry (installed only when Firefox is present)"; fi
   if grep -rqs -e 'tarkin-gpu' -e 'libmali' "$PREFIX/etc/vulkan" "$PREFIX/usr/share/vulkan/icd.d" "$PREFIX/usr/share/vulkan/implicit_layer.d" 2>/dev/null; then
@@ -496,6 +543,14 @@ main() {
     exit 1
   fi
 
+  if (( LAYER_ROLLBACK )); then
+    if (( ! DRY_RUN )) && [[ -z "$PREFIX" ]]; then
+      sudo -v || die "sudo needs your password."
+    fi
+    layer_rollback
+    exit 0
+  fi
+
   if (( REMOVE )); then
     if (( ! DRY_RUN )) && [[ -z "$PREFIX" ]]; then
       sudo -v || die "sudo needs your password."
@@ -516,6 +571,8 @@ main() {
   if (( DRY_RUN )); then
     if layer_is_current && (( ! REBUILD )); then
       info "The Vulkan Wayland layer is already installed; it would be kept."
+    elif layer_needs_images_fix; then
+      info "Would rebuild the Vulkan Wayland layer with 4 swapchain images (fixes the Firefox GPU freeze) and keep the old one in $LAYER_BACKUP."
     else
       info "Would download vulkan-wsi-layer ${WSI_COMMIT:0:7}, apply the embedded patch and compile it."
     fi
@@ -525,6 +582,9 @@ main() {
     if layer_is_current && (( ! REBUILD )); then
       info "The Vulkan Wayland layer is already installed (same source and patch); not compiled again."
     else
+      if layer_needs_images_fix; then
+        info "The installed layer uses 2 swapchain images (Firefox GPU can freeze); rebuilding it with 4."
+      fi
       build_layer
       built="$WORK_TMP/vulkan-wsi-layer/build"
     fi
@@ -535,6 +595,9 @@ main() {
 
   echo
   ok "Done."
+  if [[ -n "$built" ]] && pgrep -x firefox >/dev/null 2>&1; then
+    echo "    Firefox is running: close it and open it again to use the new layer."
+  fi
   echo "    Run a program on the GPU : gpuapp <program>      (example: gpuapp firefox)"
   echo "    Check                    : gpuapp --check         (or: bash ~/install-gpuapp.sh --check, sudo tarkin-diag)"
   echo "    Measure                  : gpuapp --measure"
@@ -549,7 +612,6 @@ main() {
   fi
 }
 
-# port/quigon/patches/vulkan-wsi-layer-quigon.patch, zoan37/lenovo-slim3-chromebook-omarchy 27ba99f (MIT), verbatim.
 write_wsi_patch() {
   cat > "$1" <<'WSI_PATCH_EOF'
 diff --git a/layer/layer.cpp b/layer/layer.cpp

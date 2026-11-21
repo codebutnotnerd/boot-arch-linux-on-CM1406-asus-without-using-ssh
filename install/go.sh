@@ -10,26 +10,33 @@ die() { echo "[-] $*" >&2; exit 1; }
 
 DRY_RUN=0
 FRESH=0
+DESKTOP=1
+WM="${TARKIN_WM:-}"
 PASS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY_RUN=1; PASS+=("$1"); shift ;;
     --fresh)   FRESH=1; shift ;;
     --resume)  shift ;;
+    --no-desktop) DESKTOP=0; PASS+=("$1"); shift ;;
+    --wm)      WM="${2:-}"; [[ -n "$WM" ]] || die "--wm needs a value: hyprland or niri"; shift 2 ;;
     -h|--help)
       cat <<'USAGE'
 Usage: sudo bash install.sh [options]
 
 Makes the Arch Linux ARM stick for the ASUS CM1406 in one go: rootfs download (continues
 an interrupted download), partitioning, rootfs, kernel, Wi-Fi, password, and a first-boot
-step that installs Hyprland, the Mali GPU stack and sound once the stick has booted.
+step that installs the Mali GPU stack and sound once the stick has booted. No desktop
+starts by itself: after the first boot, choose one with tarkin-desktop.
 If it is interrupted (power, reboot, network), run the same command again: it offers to
 resume where it stopped. Log: /var/tmp/tarkin-install.log
 
 Options:
   --dry-run            Checks and plan only; nothing is downloaded, written or changed.
   --fresh              Ignore an interrupted install and start over (erases the stick again).
-  --no-desktop         Terminal only: no first-boot Hyprland/GPU/sound setup.
+  --no-desktop         Terminal only: no first-boot GPU/sound setup.
+  --wm niri|hyprland   Optional: let the first boot set up and start this desktop (niri means
+                       niri + Vitrum Plus). Without it, choose after the first boot: tarkin-desktop
   --keymap <layout>    Keyboard layout on the stick (fr, us, de, ...). Default fr.
   --wifi-ssid <name>   Wi-Fi to use instead of the one saved in ChromeOS (passphrase is asked).
   --alarm <file|url>   Rootfs tarball to use (its .md5 must sit next to it).
@@ -39,6 +46,14 @@ USAGE
     *) PASS+=("$1"); shift ;;
   esac
 done
+
+case "$WM" in
+  ""|hyprland|niri) ;;
+  *) die "--wm must be hyprland or niri (got: $WM)." ;;
+esac
+(( DESKTOP )) || [[ -z "$WM" ]] || die "--wm $WM needs the desktop; it cannot be combined with --no-desktop."
+WM_ARGS=()
+[[ -z "$WM" ]] || WM_ARGS=(--wm "$WM")
 
 [[ $EUID -eq 0 ]] || die "Run as root, in VT2:  sudo bash install.sh"
 echo "=== boot-arch-linux-on-CM1406 v$VERSION ==="
@@ -101,12 +116,12 @@ if [[ -n "$saved_uuid" && "$(state_get STEP_complete)" != "done" ]] && (( ! FRES
     echo "An interrupted install was found on $resume_dev:"
     lsblk -o NAME,SIZE,MODEL,LABEL "$resume_dev" 2>/dev/null || true
     if (( DRY_RUN )); then
-      exec env CONFIRM_ERASE="$resume_dev" bash "$HERE/install-usb.sh" --resume ${ALARM_ARGS[@]+"${ALARM_ARGS[@]}"} ${PASS[@]+"${PASS[@]}"} "$resume_dev"
+      exec env CONFIRM_ERASE="$resume_dev" bash "$HERE/install-usb.sh" --resume ${ALARM_ARGS[@]+"${ALARM_ARGS[@]}"} ${WM_ARGS[@]+"${WM_ARGS[@]}"} ${PASS[@]+"${PASS[@]}"} "$resume_dev"
     fi
     read -r -p "Resume it (finished steps are skipped)? [Y/n] " ans
     case "${ans:-y}" in
       y|Y|yes|o|O|oui)
-        exec env CONFIRM_ERASE="$resume_dev" bash "$HERE/install-usb.sh" --resume ${ALARM_ARGS[@]+"${ALARM_ARGS[@]}"} ${PASS[@]+"${PASS[@]}"} "$resume_dev" ;;
+        exec env CONFIRM_ERASE="$resume_dev" bash "$HERE/install-usb.sh" --resume ${ALARM_ARGS[@]+"${ALARM_ARGS[@]}"} ${WM_ARGS[@]+"${WM_ARGS[@]}"} ${PASS[@]+"${PASS[@]}"} "$resume_dev" ;;
       *) echo "Not resuming: a new install starts (the stick you pick is erased)." ;;
     esac
   else
@@ -121,7 +136,7 @@ default="/dev/${disks[0]%% *}"
 if (( DRY_RUN )); then
   DEV="$default"
   echo "Dry run on the first USB drive: $DEV"
-  exec bash "$HERE/install-usb.sh" ${ALARM_ARGS[@]+"${ALARM_ARGS[@]}"} ${PASS[@]+"${PASS[@]}"} "$DEV"
+  exec bash "$HERE/install-usb.sh" ${ALARM_ARGS[@]+"${ALARM_ARGS[@]}"} ${WM_ARGS[@]+"${WM_ARGS[@]}"} ${PASS[@]+"${PASS[@]}"} "$DEV"
 fi
 read -r -p "Device to ERASE and install on [$default]: " DEV
 DEV="${DEV:-$default}"
@@ -135,4 +150,4 @@ echo "ALL DATA ON $DEV WILL BE ERASED."
 read -r -p "Type the device name again to confirm ($DEV): " confirm
 [[ "$confirm" == "$DEV" ]] || die "Confirmation did not match. Aborting."
 
-exec env CONFIRM_ERASE="$DEV" bash "$HERE/install-usb.sh" ${ALARM_ARGS[@]+"${ALARM_ARGS[@]}"} ${PASS[@]+"${PASS[@]}"} "$DEV"
+exec env CONFIRM_ERASE="$DEV" bash "$HERE/install-usb.sh" ${ALARM_ARGS[@]+"${ALARM_ARGS[@]}"} ${WM_ARGS[@]+"${WM_ARGS[@]}"} ${PASS[@]+"${PASS[@]}"} "$DEV"

@@ -4,9 +4,9 @@ tarkin_reason() {
 }
 if [ -f /var/lib/tarkin/firstboot.pending ]; then
   echo "------------------------------------------------------------------------"
-  echo " First-boot setup in progress: Hyprland, Mali GPU and sound are being"
+  echo " First-boot setup in progress: the Mali GPU stack and sound are being"
   echo " installed (20-60 minutes, needs Wi-Fi). Do not power off. The machine"
-  echo " restarts by itself into Hyprland when it is done."
+  echo " restarts by itself when it is done; then choose a desktop: tarkin-desktop"
   echo "   Progress : tail -f /var/log/tarkin-firstboot.log   (Ctrl+C to stop watching)"
   echo "   No Wi-Fi?: sudo tarkin-wifi \"NetworkName\""
   if [ -f /var/lib/tarkin/firstboot.failed ]; then
@@ -16,10 +16,17 @@ if [ -f /var/lib/tarkin/firstboot.pending ]; then
   echo "------------------------------------------------------------------------"
 elif [ -f /var/lib/tarkin/firstboot.failed ]; then
   echo "------------------------------------------------------------------------"
-  echo " The first-boot setup (Hyprland, GPU, sound) FAILED and stopped retrying."
+  echo " The first-boot setup (GPU, sound) FAILED and stopped retrying."
   tarkin_reason
   echo "   Why      : tail -n 40 /var/log/tarkin-firstboot.log"
-  echo "   Retry    : bash ~/install-hyprland.sh      (as alarm, NOT with sudo)"
+  echo "   Retry    : bash ~/install-hyprland.sh --no-autostart   (as alarm, NOT with sudo)"
+  echo "------------------------------------------------------------------------"
+elif [ -f /var/lib/tarkin/firstboot.done ] && ! grep -qs '^TARKIN_SESSION=desktop' /etc/tarkin/console.env; then
+  echo "------------------------------------------------------------------------"
+  echo " No desktop starts at boot. Choose one (this message then goes away):"
+  echo "   tarkin-desktop              menu"
+  echo "   tarkin-desktop --niri       niri + Vitrum Plus"
+  echo "   tarkin-desktop --hyprland   Hyprland, base config"
   echo "------------------------------------------------------------------------"
 fi
 unset -f tarkin_reason

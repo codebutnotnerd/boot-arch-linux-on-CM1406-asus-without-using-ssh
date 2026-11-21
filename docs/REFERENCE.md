@@ -1,4 +1,4 @@
-# Reference (v1.50)
+# Reference (v1.60)
 
 Full details. The short version is in [README.md](../README.md).
 
@@ -22,6 +22,11 @@ the light lock and the Bluetooth setup done by `install-hyprland.sh` ([Bluetooth
 New in v1.50 and not tested on the hardware yet: the F6/F7/F8 keys ([Keys](#keys)), smooth mode
 ([Smooth mode](#smooth-mode-optional)), the first-boot failure report ([When it doesn't work](#when-it-doesnt-work))
 and rerunning `install-hyprland.sh` on a stick made before v1.40 ([Older sticks](#older-sticks)).
+New in v1.60 and not tested on the hardware yet: the "stick in use" check before erasing ([Install](#install), step 4)
+the desktop chosen after the first boot with `tarkin-desktop` ([Install](#install), step 7), smooth mode under niri and its self-repair
+([Smooth mode](#smooth-mode-optional)), Super+Shift+S in niri ([niri](#niri-optional)), the 4-image layer built by
+`install-gpuapp.sh` (the same change, made by hand, stopped the Firefox GPU freeze on 2026-11-21) and the faster
+package check of `install-hyprland.sh`.
 
 Reported working by testers: Bluetooth with audio (a JBL speaker, set up by hand), and the keyboard backlight LEDs. The touchpad is detected; it is tuned
 only in the Hyprland desktop (see [Touchpad](#touchpad)). Not tested at all: suspend (it is off), touchscreen. The GPU is unused
@@ -90,7 +95,16 @@ sudo bash install.sh
 
 (`sudo bash install/go.sh` is the same thing.) It finds the rootfs and the stick, shows you the device and makes you
 type its name before erasing anything. It checks that the package mirror answers before it erases anything, and it
-reads the kernel back after writing it. Wait for `[+] USB written` before you unplug. `sudo bash install.sh --dry-run`
+reads the kernel back after writing it. Wait for `[+] USB written` before you unplug.
+
+Before it writes anything, it checks that nothing uses the stick: mounts (also in other mount namespaces, like the
+Files app), swap, device-mapper, LVM or RAID on it, and programs with a file or folder open on it (read from `/proc`,
+so it works without `fuser`). Mounts are unmounted; anything else stops the install with the list of what uses the
+stick (process number and name, mount point). The same check runs again just before partitioning and just before
+`mkfs.ext4`. Before the new partition table is written, the start of each old partition is zeroed, so ChromeOS does
+not mount the old `ALARM` filesystem again while the kernel rereads the table (`partx`, `partprobe` or
+`blockdev --rereadpt`, then `udevadm settle`). The target must be a whole USB disk that holds no ChromeOS system
+folder; the internal disk is always refused. `sudo bash install.sh --dry-run`
 runs the checks and prints the plan without downloading, writing or changing anything.
 
 **Password (required).** It asks twice for the password of `alarm` (used by `sudo` on the stick): at least 8
@@ -114,7 +128,8 @@ Options go after `install.sh`, for example `sudo bash install.sh --keymap us`:
 |---|---|
 | `--dry-run` | Checks and plan only; nothing is downloaded, written or changed. |
 | `--fresh` | Ignore an interrupted install and start over (the stick is erased again). |
-| `--no-desktop` | Terminal only: no first-boot Hyprland / GPU / sound setup. |
+| `--no-desktop` | Terminal only: no first-boot GPU / sound setup. |
+| `--wm niri` or `--wm hyprland` | Optional: the first boot also sets up this desktop and starts it (`niri` means niri + Vitrum Plus). Without it no desktop starts until you run `tarkin-desktop`. `TARKIN_WM=niri` does the same. Kept when an install is resumed. |
 | `--keymap <layout>` | Keyboard layout of the terminal (`fr`, `us`, `de`, ...). Default `fr`. |
 | `--wifi-ssid <name>` | Use this Wi-Fi instead of the one saved in ChromeOS (it asks for the passphrase). |
 | `--alarm <file or url>` | Rootfs tarball, with its `.md5` next to it (a `.sig` beside it is verified against the Arch Linux ARM key when `gpg` and a keyserver are available; a signature that does not verify stops the install). |
@@ -130,20 +145,39 @@ Options go after `install.sh`, for example `sudo bash install.sh --keymap us`:
 use the arrow keys and Enter on "Boot from external disk" if you get the newer menu. After a minute or two a terminal
 replaces the logo. If you did not set Wi-Fi during the install, run `sudo tarkin-wifi "NetworkName"`.
 
-**6. First boot (automatic).** `tarkin-firstboot.service` waits for the network, then runs `~/install-hyprland.sh` as
-`alarm` (never as root): Hyprland, the Mali GPU stack, the GNOME packages and the PipeWire sound stack. It takes 20 to
-60 minutes; every terminal shows a notice while it runs, and the progress is in `/var/log/tarkin-firstboot.log`
-(`tail -f /var/log/tarkin-firstboot.log`). Do not power off. When it is done the machine restarts once and Hyprland
-starts by itself. If it fails, the next boot tries again (3 times at most); the log says why, and
-`bash ~/install-hyprland.sh` (as `alarm`, without `sudo`) does the same by hand. During the run only, a temporary sudo
-rule lets `alarm` use `sudo` without a password (the script needs it); it is removed when the run ends, by the
-service's stop step, and at every boot by `/etc/tmpfiles.d/tarkin-firstboot.conf`. Extra `install-hyprland.sh`
-options (for example `--with-gdm`) go in `/etc/tarkin/firstboot.conf` as `FIRSTBOOT_ARGS="--with-gdm"`;
-`FIRSTBOOT_REBOOT=0` restarts the display instead of the machine.
+**6. First boot (automatic).** `tarkin-firstboot.service` waits for the network, then runs
+`~/install-hyprland.sh --no-autostart` as `alarm` (never as root): the Mali GPU stack, the GNOME and Hyprland packages
+and the PipeWire sound stack. No desktop is started. It takes 20 to 60 minutes; every terminal shows a notice while it
+runs, and the progress is in `/var/log/tarkin-firstboot.log` (`tail -f /var/log/tarkin-firstboot.log`). Do not power
+off. When it is done the machine restarts once into the terminal (cage + foot), and every new terminal says how to
+choose a desktop. If it fails, the next boot tries again (3 times at most); the log says why, and
+`bash ~/install-hyprland.sh --no-autostart` (as `alarm`, without `sudo`) does the same by hand. During the run only, a
+temporary sudo rule lets `alarm` use `sudo` without a password (the script needs it); it is removed when the run ends,
+by the service's stop step, and at every boot by `/etc/tmpfiles.d/tarkin-firstboot.conf`. Extra `install-hyprland.sh`
+options go in `/etc/tarkin/firstboot.conf` as `FIRSTBOOT_ARGS="..."`; `FIRSTBOOT_REBOOT=0` restarts the display
+instead of the machine. With `--wm hyprland` the installer writes `FIRSTBOOT_WM=hyprland` there and the first boot
+runs `install-hyprland.sh` without `--no-autostart`, so Hyprland starts at boot. With `--wm niri` it writes
+`FIRSTBOOT_WM=niri`: after the base, the first boot runs `tarkin-desktop --niri`; if that part fails the terminal
+stays and the log says what to type.
+
+**7. Choose the desktop.** As `alarm`, run `tarkin-desktop` (menu) or `tarkin-desktop --niri`,
+`--hyprland`, `--none`, `--undo-niri`, `--status`; `--yes` and `--no-reboot` skip the questions. It is
+`choose-desktop.sh` from the release, installed as `/usr/local/bin/tarkin-desktop`, and can be run again to switch.
+
+- `--niri`: installs the base if missing (`install-hyprland.sh --no-autostart`), runs `~/install-niri.sh`, installs
+  `quickshell` and `qt6-declarative` when missing (noted in `~/.local/state/tarkin-desktop/packages`), checks the
+  SHA-256 of `~/install-vitrum-plus-niri-v10.sh`, runs it with `--apply` (plus `--replace-dock` when the old Tarkin
+  niri dock is there; `--upgrade --apply` on an older Vitrum Plus), then `--system-access --apply`,
+  `sudo tarkin-display hyprland` (desktop session) and `sudo tarkin-wm niri`.
+- `--hyprland`: installs the base if missing, then `sudo tarkin-display hyprland` and `sudo tarkin-wm hyprland`.
+- `--none`: `sudo tarkin-display terminal`.
+- `--undo-niri`: Vitrum Plus `--no-system-access --apply` and `--rollback --apply`, `sudo tarkin-wm hyprland`,
+  `install-niri.sh --remove`, then `--none`. Packages stay; it prints the `sudo pacman -Rs` line for the ones it added.
 
 ## Desktop
 
-The first boot does this by itself (see Install, step 6); this section is for doing it by hand, on a stick
+The first boot installs the base and `tarkin-desktop` picks the desktop (see Install, steps 6 and 7); this section
+is for doing it by hand, on a stick
 made with `--no-desktop` or on an older stick that has no `tarkin-firstboot.service`. Needs Wi-Fi. Hyprland 0.57 and later read only `~/.config/hypr/hyprland.lua` (the old `hyprland.conf` is ignored), so the script writes both files. In the on-screen terminal:
 
 ```sh
@@ -211,20 +245,23 @@ The Lua form is `hl.bind("F8", hl.dsp.exec_cmd("/usr/local/bin/tarkin-kbd-backli
 ### Smooth mode (optional)
 
 Off by default. It sets the GPU minimum frequency to 526 MHz (factory: 390 MHz, maximum 1100 MHz) and gives
-Hyprland a minimum CPU utilization of 512 (`uclampset`), which makes the scheduler keep it on the two fast cores.
-Programs started from Hyprland do not inherit it. On the CM1406 the same settings, made by hand, made the desktop
+the compositor (Hyprland or niri, since v1.60) a minimum CPU utilization of 512 (`uclampset`), which makes the
+scheduler keep it on the two fast cores. Programs started from the desktop do not inherit it. On the CM1406 the same settings, made by hand, made the desktop
 clearly smoother (2026-11-18, not measured). It uses more power.
 
 ```sh
 sudo tarkin-smooth on       # now and at every boot
-tarkin-smooth status        # GPU min/current/max, Hyprland's clamp
+tarkin-smooth status        # GPU min/current/max, the compositor's clamp
 sudo tarkin-smooth off      # back to the factory values
 ```
 
 `on` enables `tarkin-smooth.service`. The service saves the current GPU minimum in `/var/lib/tarkin/smooth.gpu-min`,
 writes 526000000 to `/sys/class/devfreq/13000000.gpu/min_freq` (the first `*gpu*` or `*mali*` devfreq node when that
-one is missing) only when that value is listed in `available_frequencies`, and every 15 s applies the clamp to any
-new Hyprland process. `off` (or stopping the service) writes the saved value back and sets the clamp to 0. A GPU
+one is missing) only when that value is listed in `available_frequencies`. Every 15 s it applies the clamp to a new
+Hyprland or niri process, sets the floor again when the minimum went back down by itself (the journal counts it), and
+waits for the GPU node when the driver appears after the service. When the GPU gets hot the kernel lowers the maximum,
+and the minimum follows it: the journal and `status` say so, and the floor comes back when it cools down. In a quiet
+desktop the loop starts no program at all (v1.50: 4 per check). `off` (or stopping the service) writes the saved value back and sets the clamp to 0. A GPU
 minimum already at 526 MHz or more is left alone. Without a devfreq node or without clamp support in the kernel,
 that half is skipped and the journal says so: `journalctl -u tarkin-smooth -b`.
 
@@ -240,7 +277,15 @@ gpuapp --check                # one line: apps on the GPU: yes/no (reason)
 gpuapp --measure              # CPU against GPU with glmark2-es2-wayland, when it is installed
 bash ~/install-gpuapp.sh --check     # verifies the installed files too
 bash ~/install-gpuapp.sh --remove    # removes everything it installed (packages stay)
+bash ~/install-gpuapp.sh --layer-rollback   # puts back the 2-image layer replaced by v1.60
 ```
+
+Since v1.60 the layer is built with a minimum of 4 swapchain images on Wayland (`{ 2, 0 }` becomes `{ 4, 0 }` in
+`wsi/wayland/surface_properties.cpp`; `SOURCE` gets the line `min_image_count=4`). With 2, Zink asks for 2 images
+in mailbox mode and Firefox could wait forever for a buffer the compositor still held. An install without that line
+is rebuilt when the script runs again; the old `.so`, `.json` and `SOURCE` go to `layer/backup-min-images-2` (the
+same folder as `fix-gpuapp-wsi-images.sh`, so either rollback works). The source is fetched with
+`git fetch --depth 1` of the pinned commit, with a full clone when the server refuses it.
 
 How: libmali is also a Vulkan 1.4 driver with a headless surface only. ARM's `vulkan-wsi-layer` (commit `f5148d4`,
 compiled on the stick with zoan37's patch, MIT, embedded in the script and checked by SHA-256) adds the Wayland
@@ -251,7 +296,7 @@ software-rendering variables, for that one program only. Files: `/usr/local/lib/
 mode 0660) and `/usr/local/share/applications/firefox-gpu.desktop` when Firefox is installed. Nothing goes into
 `/etc/vulkan`: without `gpuapp` no program sees the driver, and Hyprland, `hyprland-mali`, the shim, `console.env`
 and the terminal fallback are unchanged. The script refuses to install when libmali is missing, has no Vulkan driver,
-the Mali probe fails or no running Hyprland has libmali loaded. Packages added: `vulkan-icd-loader`, `vulkan-tools`,
+the Mali probe fails or no running Hyprland or niri has libmali loaded. Packages added: `vulkan-icd-loader`, `vulkan-tools`,
 `mesa-utils`, `wayland-utils`, `git`, `cmake`, `gcc`, `make`, `pkgconf`, `vulkan-headers`, `wayland-protocols`, `libdrm`.
 
 Checked on the CM1406 (2026-11-18, Hyprland 0.57.2, Mesa 26.2.7): the script installed and `gpuapp --check`
@@ -261,6 +306,28 @@ answered `apps on the GPU: yes (zink Vulkan 1.4(Mali-G57 (ARM_PROPRIETARY)))`; `
 Limits: Wayland programs only (X11 programs such as `glxgears` fail);
 Chromium and Electron applications fall back to the CPU; Qt Quick applications crash under Zink; video decoding stays
 on the CPU.
+
+## niri (optional)
+
+`install-niri.sh` installs niri and `xwayland-satellite` next to Hyprland. niri needs its own build of the EGL shim
+of `install-hyprland.sh`, `/usr/local/lib/tarkin-gpu/niri/lib/libEGL.so.1`: the shim source is copied, its
+`eglGetProcAddress` table also returns the shim's own `eglGetProcAddress` (without that, niri's EGL loader ends up on
+libmali and finds no GBM platform), and it is linked with `-Bsymbolic`. A probe (`niri/bin/niri-egl-probe`) checks
+it on the GPU before anything is installed. Hyprland's shim is not changed.
+
+`sudo tarkin-wm niri` adds `/etc/systemd/system/tarkin-console.service.d/50-tarkin-wm.conf`, which makes
+`hyprland-mali` start `/usr/local/libexec/tarkin/niri-start` instead of Hyprland. `niri-start` waits up to 45 s for
+niri to show a screen and starts Hyprland if it does not, or when niri stops (log: `$XDG_RUNTIME_DIR/tarkin-niri.log`).
+`sudo tarkin-wm hyprland` removes the drop-in. `bash ~/install-niri.sh --remove` removes the launcher, `tarkin-wm`,
+`/usr/local/lib/tarkin-gpu/niri` and the drop-in, and puts back the previous `~/.config/niri/config.kdl` (packages are
+kept). `--dry-run` shows the plan. Not with niri: the Waybar workspaces.
+
+Super+Shift+S runs niri's own `screenshot` action: pick a region, Enter or Space copies it to the clipboard and saves
+it in `~/Pictures/Screenshots` (no extra package). A config written by `install-niri.sh` gets it directly. On your own
+config, `install-niri.sh` (or `--screenshot-key` alone) adds that single line under `binds {` after `niri validate`
+accepts it, with a copy in `config.kdl.before-tarkin-screenshot`; it changes nothing when Super+Shift+S is already
+bound, when the file has no single `binds {` line, or when the old Tarkin niri dock checks the file. `--remove`
+takes the line out again and deletes the copy when the result is identical to it.
 
 ## Tools on the stick
 
@@ -384,7 +451,7 @@ limits (Netflix not tested): [FIREFOX-WIDEVINE.md](FIREFOX-WIDEVINE.md).
 
 ### Older sticks
 
-Run `install-hyprland.sh` from the unpacked v1.50 folder (it needs the `rootfs/` next to it), as `alarm`, without
+Run `install-hyprland.sh` from the unpacked v1.60 folder (it needs the `rootfs/` next to it), as `alarm`, without
 `sudo`. On a stick made before v1.40 it installs `tarkin-display`, `display-guard` and the current
 `tarkin-console.service` (old copies kept as `*.before-v150`), and `tarkin-session` becomes the short name for
 `tarkin-display` only once `tarkin-display` is there. When GDM is enabled and no `/etc/tarkin/display-owner` exists
@@ -585,7 +652,7 @@ To undo everything: remove the stick and boot ChromeOS (`Ctrl+D`). To put the fi
 - `install/install-usb.sh`: the installer (resumable; logs to `/var/tmp/tarkin-install.log`, progress in `/var/tmp/tarkin-install/`)
 - `scripts/repair-boot.sh`: checks and repairs what lets the Chromebook boot the stick (after a ChromeOS update)
 - `scripts/lib-chromeos.sh`: helpers shared by the ChromeOS-side scripts (USB boot flag name, stick detection)
-- `rootfs/usr/local/libexec/tarkin/firstboot` + `tarkin-firstboot.service`: the first-boot Hyprland / GPU / sound setup
+- `rootfs/usr/local/libexec/tarkin/firstboot` + `tarkin-firstboot.service`: the first-boot GPU / sound setup
 - `rootfs/usr/local/libexec/tarkin/audio-profile`, `audio-jack`, `rootfs/etc/tarkin/audio.conf`, `tarkin-audio-test`: sound
 - `scripts/preflight-tarkin.sh`: read-only checks before installing
 - `scripts/check-usb.sh`: diagnoses a stick and the last failed boot (it also verifies that every group of the
@@ -597,6 +664,9 @@ To undo everything: remove the stick and boot ChromeOS (`Ctrl+D`). To put the fi
   `rootfs/etc/xdg/tarkin/`, `rootfs/etc/wireplumber/wireplumber.conf.d/52-tarkin-bluetooth.conf`)
 - `install-xfce.sh`: optional XFCE + SDDM packages and configuration (copied to `/home/alarm`)
 - `install-gpuapp.sh`: optional `gpuapp` launcher, applications on the GPU through Zink (copied to `/home/alarm`)
+- `install-niri.sh`: optional niri next to Hyprland, with its EGL fix and `tarkin-wm` (copied to `/home/alarm`)
+- `choose-desktop.sh`: the desktop menu, installed as `/usr/local/bin/tarkin-desktop`
+- `scripts/install-vitrum-plus-niri-v10.sh`: the Vitrum Plus v10 desktop for niri (copied to `/home/alarm`)
 - `rootfs/usr/local/bin/tarkin-display`, `rootfs/usr/local/libexec/tarkin/display-guard`: display owner for the next boot
 - `rootfs/usr/local/bin/tarkin-smooth`, `rootfs/usr/local/libexec/tarkin/smooth`, `tarkin-smooth.service`: optional smooth mode
 - `rootfs/usr/local/bin/tarkin-kbd-backlight`: keyboard backlight toggle (`F8`)
@@ -626,5 +696,8 @@ To undo everything: remove the stick and boot ChromeOS (`Ctrl+D`). To put the fi
 
 Based on zoan37's Omarchy / Arch Linux ARM Chromebook project
 (<https://github.com/zoan37/lenovo-slim3-chromebook-omarchy>), cut down to the Tarkin USB boot. The seatd
-without VT idea comes from that project's work on another Skywalker variant. MIT license, see [`LICENSE`](../LICENSE).
+without VT idea comes from that project's work on another Skywalker variant. Vitrum Plus contains widgets adapted from
+MacShell-niri (<https://github.com/frithTK/MacShell-niri>, commit 844d7ce, MIT, (c) 2026 Rickky) and bundles the
+Open Runde font (<https://github.com/lauridskern/open-runde>, SIL Open Font License 1.1). MIT license, see
+[`LICENSE`](../LICENSE).
 

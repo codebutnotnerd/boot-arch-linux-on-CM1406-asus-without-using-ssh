@@ -5,3 +5,5 @@ After=multi-user.target tarkin-console.service
 [Service]
 Type=oneshot
 ExecStart=/usr/local/libexec/tarkin/bootlog
+Nice=19
+IOSchedulingClass=idle

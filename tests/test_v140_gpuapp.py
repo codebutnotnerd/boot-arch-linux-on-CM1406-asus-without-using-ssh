@@ -85,10 +85,17 @@ printf 'GPU0:\\n\\tapiVersion = 1.4.313\\n\\tdeviceName = Mali-G57\\n\\tdriverIn
         self.mock("git", """#!/bin/bash
 echo "git $*" >> "$CALLS"
 [[ "${GIT_FAIL:-0}" == 1 ]] && { echo 'fatal: unable to access'; exit 128; }
+tree() {
+  mkdir -p "$1/wsi/wayland" && echo 'set(CMAKE_CXX_FLAGS "-Wall -Werror -pthread")' > "$1/CMakeLists.txt"
+  printf '   surface_properties_override_params override_params = { %s, 0 };\n' "${WSI_MIN:-2}" > "$1/wsi/wayland/surface_properties.cpp"
+}
 case "$1" in
-  clone) mkdir -p "$3" && echo 'set(CMAKE_CXX_FLAGS "-Wall -Werror -pthread")' > "$3/CMakeLists.txt" ;;
+  clone) tree "$3" ;;
+  init) tree "$3" ;;
   -C) case "$3" in
-        checkout) echo "${WRONG_HEAD:-$5}" > "$2/.head" ;;
+        fetch) [[ "${SHALLOW_FAIL:-0}" == 1 ]] && { echo 'error: Server does not allow request for unadvertised object'; exit 128; }
+               echo "$8" > "$2/.fetched" ;;
+        checkout) if [[ "$5" == FETCH_HEAD ]]; then echo "${WRONG_HEAD:-$(cat "$2/.fetched")}" > "$2/.head"; else echo "${WRONG_HEAD:-$5}" > "$2/.head"; fi ;;
         rev-parse) cat "$2/.head" ;;
         apply) cp "$4" "$2/applied.patch" ;;
       esac ;;
@@ -101,6 +108,7 @@ echo "make $*" >> "$CALLS"
 [[ "${MAKE_FAIL:-0}" == 1 ]] && { echo 'error: boom in wsialloc_helpers.c'; exit 2; }
 grep -q -- '-Werror' "$2/../CMakeLists.txt" && echo "WERROR-KEPT" >> "$CALLS"
 sha256sum "$2/../applied.patch" | cut -d' ' -f1 > "$CALLS.patch"
+cp "$2/../wsi/wayland/surface_properties.cpp" "$CALLS.images"
 echo 'layer fixture' > "$2/libVkLayer_window_system_integration.so"
 echo '{ "file_format_version": "1.0.0", "layer": { "library_path": "./libVkLayer_window_system_integration.so" } }' > "$2/VkLayer_window_system_integration.json"
 """)
@@ -164,8 +172,11 @@ printf 'Wayland platform:\\nEGL API version: 1.5\\nOpenGL core profile vendor: M
         self.assertEqual((self.prefix / "etc/udev/rules.d/70-tarkin-dma-heap.rules").read_text(),
                          'SUBSYSTEM=="dma_heap", KERNEL=="system", GROUP="video", MODE="0660"\n')
         log = self.log()
-        self.assertIn("git clone https://gitlab.freedesktop.org/mesa/vulkan-wsi-layer.git ", log)
-        self.assertIn(f"checkout -q {WSI_COMMIT}", log)
+        self.assertIn(f"fetch -q --depth 1 https://gitlab.freedesktop.org/mesa/vulkan-wsi-layer.git {WSI_COMMIT}\n", log)
+        self.assertIn("checkout -q FETCH_HEAD", log)
+        self.assertNotIn("git clone", log)
+        self.assertEqual(Path(str(self.calls) + ".images").read_text(),
+                         "   surface_properties_override_params override_params = { 4, 0 };\n")
         self.assertIn("cmake . -Bbuild -DCMAKE_BUILD_TYPE=Release -DBUILD_WSI_HEADLESS=1 -DBUILD_WSI_WAYLAND=1 "
                       "-DSELECT_EXTERNAL_ALLOCATOR=dma_buf_heaps -DWSIALLOC_MEMORY_HEAP_NAME=system "
                       "-DKERNEL_HEADER_DIR=/usr/include\n", log)
@@ -174,6 +185,7 @@ printf 'Wayland platform:\\nEGL API version: 1.5\\nOpenGL core profile vendor: M
         stamp = (self.prefix / "usr/local/lib/tarkin-gpu/vulkan/layer/SOURCE").read_text()
         self.assertIn(f"commit={WSI_COMMIT}\n", stamp)
         self.assertIn(f"patch_sha256={UPSTREAM_PATCH_SHA256}\n", stamp)
+        self.assertTrue(stamp.endswith("\nmin_image_count=4\n"))
         self.assertEqual(after["usr/local/bin/gpuapp"][1], 0o755)
         self.assertEqual(after["usr/local/lib/tarkin-gpu/vulkan/mali_icd.json"][1], 0o644)
         self.assertFalse((self.prefix / "etc/vulkan").exists())
@@ -204,17 +216,17 @@ printf 'Wayland platform:\\nEGL API version: 1.5\\nOpenGL core profile vendor: M
         first = self.snapshot()
         result = self.install()
         self.assertEqual(self.snapshot(), first)
-        self.assertEqual(self.log().count("git clone"), 1)
+        self.assertEqual(self.log().count("git init"), 1)
         self.assertIn("not compiled again", result.stdout)
         self.install("--rebuild")
-        self.assertEqual(self.log().count("git clone"), 2)
+        self.assertEqual(self.log().count("git init"), 2)
         self.assertEqual(self.snapshot(), first)
 
     def test_dry_run_changes_nothing(self):
         before = self.snapshot()
         result = self.install("--dry-run")
         self.assertEqual(self.snapshot(), before)
-        self.assertNotIn("git clone", self.log())
+        self.assertNotIn("git ", self.log())
         self.assertIn("[dry-run]", result.stdout)
 
     def assert_refused(self, message, *args, **extra):
@@ -227,7 +239,7 @@ printf 'Wayland platform:\\nEGL API version: 1.5\\nOpenGL core profile vendor: M
     def test_refuses_without_libmali(self):
         shutil.rmtree(self.prefix / "usr/local/lib/tarkin-gpu/mali")
         self.assert_refused("libmali is missing")
-        self.assertNotIn("git clone", self.log())
+        self.assertNotIn("git ", self.log())
 
     def test_refuses_dangling_libmali_link(self):
         (self.prefix / "usr/local/lib/tarkin-gpu/mali/lib/libmali.so.0.54.1").unlink()
@@ -262,14 +274,14 @@ exec seq -f '%.0f: 0000000000a1b2c3   120 FUNC    GLOBAL DEFAULT   12 mali_symbo
 
     def test_refuses_when_hyprland_is_on_software_rendering(self):
         self.assert_refused("The desktop is not on the GPU", HYPR_PIDS="4343")
-        self.assertNotIn("git clone", self.log())
+        self.assertNotIn("git ", self.log())
 
     def test_refuses_when_mali_probe_fails(self):
         self.assert_refused("Mali GPU probe failed", PROBE_FAIL="1")
 
     def test_refuses_when_vulkan_loader_sees_no_mali(self):
         self.assert_refused("does not find the Mali driver", VULKAN_FAIL="1")
-        self.assertNotIn("git clone", self.log())
+        self.assertNotIn("git ", self.log())
 
     def test_build_failure_installs_nothing_and_keeps_the_log(self):
         result = self.assert_refused("Building vulkan-wsi-layer failed", MAKE_FAIL="1")
@@ -490,6 +502,65 @@ printf '=======\\n    glmark2 Score: %s \\n=======\\n' "$s"
         self.assertEqual(len(lines), 1)
         self.assertTrue(lines[0].startswith('[[ -x /usr/local/bin/gpuapp ]] && sh_ "runuser -u $user -- '), lines[0])
         self.assertTrue(lines[0].endswith('/usr/local/bin/gpuapp --check"'))
+
+    def old_layer(self, extra=""):
+        layer = self.prefix / "usr/local/lib/tarkin-gpu/vulkan/layer"
+        stamp = layer / "SOURCE"
+        text = stamp.read_text().replace("min_image_count=4\n", "") + extra
+        stamp.write_text(text)
+        (layer / "libVkLayer_window_system_integration.so").write_text("old 2-image layer\n")
+        return layer
+
+    def test_shallow_fetch_refused_falls_back_to_clone(self):
+        self.install(SHALLOW_FAIL="1")
+        log = self.log()
+        self.assertIn("git clone https://gitlab.freedesktop.org/mesa/vulkan-wsi-layer.git ", log)
+        self.assertIn(f"checkout -q {WSI_COMMIT}", log)
+        self.assertIn("{ 4, 0 }", Path(str(self.calls) + ".images").read_text())
+
+    def test_source_without_the_image_line_installs_nothing(self):
+        self.assert_refused("Building vulkan-wsi-layer failed", WSI_MIN="3")
+
+    def test_two_image_layer_is_upgraded_with_exact_backup_and_rollback(self):
+        self.install()
+        layer = self.old_layer()
+        old = self.snapshot()
+        result = self.install()
+        self.assertIn("rebuilding it with 4", result.stdout)
+        backup = layer / "backup-min-images-2"
+        self.assertEqual((backup / "libVkLayer_window_system_integration.so").read_text(), "old 2-image layer\n")
+        self.assertIn("min_image_count=4", (layer / "SOURCE").read_text())
+        self.assertNotIn("min_image_count=4", (backup / "SOURCE").read_text())
+        upgraded = self.snapshot()
+        self.assertIn("not compiled again", self.install().stdout)
+        self.assertEqual(self.snapshot(), upgraded)
+        self.install("--layer-rollback")
+        self.assertEqual(self.snapshot(), old)
+        self.install("--layer-rollback", ok=False)
+        self.assertEqual(self.snapshot(), old)
+
+    def test_layer_fixed_by_the_separate_script_is_kept(self):
+        self.install()
+        layer = self.old_layer("min_image_count=4\n")
+        before = self.snapshot()
+        self.assertIn("not compiled again", self.install().stdout)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.log().count("git init"), 1)
+        self.assertFalse((layer / "backup-min-images-2").exists())
+
+    def test_check_reports_a_two_image_layer(self):
+        self.install()
+        self.old_layer()
+        result = self.install("--check", ok=False)
+        self.assertIn("2 swapchain images", result.stdout)
+
+    def test_dry_run_on_a_two_image_layer_changes_nothing(self):
+        self.install()
+        self.old_layer()
+        before = self.snapshot()
+        result = self.install("--dry-run")
+        self.assertIn("4 swapchain images", result.stdout)
+        self.assertEqual(self.snapshot(), before)
 
 
 if __name__ == "__main__":

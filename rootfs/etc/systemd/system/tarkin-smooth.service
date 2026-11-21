@@ -1,5 +1,5 @@
 [Unit]
-Description=Tarkin smooth mode (GPU minimum 526 MHz, Hyprland on the fast cores)
+Description=Tarkin smooth mode (GPU minimum 526 MHz, desktop on the fast cores)
 After=tarkin-console.service
 
 [Service]

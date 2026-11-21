@@ -6,6 +6,8 @@ INTERVAL="${TARKIN_SMOOTH_INTERVAL:-15}"
 GPU_HZ=526000000
 UCLAMP_MIN=512
 SAVED="$STATE/smooth.gpu-min"
+PROC="${TARKIN_PROC:-/proc}"
+COMPOSITORS="${TARKIN_SMOOTH_COMPOSITORS:-Hyprland niri}"
 
 log() { echo "tarkin-smooth: $*"; }
 
@@ -65,15 +67,136 @@ gpu_off() {
   rm -f "$SAVED"
 }
 
+compositor_pids() {
+  command -v pgrep >/dev/null 2>&1 || return 0
+  pgrep -x "${COMPOSITORS// /|}"
+}
+
 set_uclamp() {
   local value="$1" pid
   command -v uclampset >/dev/null 2>&1 || return 1
-  command -v pgrep >/dev/null 2>&1 || return 1
-  for pid in $(pgrep -x Hyprland); do
-    uclampset -a -R -m "$value" -p "$pid" >/dev/null 2>&1 ||
-      uclampset -a -m "$value" -p "$pid" >/dev/null 2>&1 ||
-      { log "uclampset refused Hyprland ($pid); this kernel may lack utilization clamping."; return 1; }
+  for pid in $(compositor_pids); do
+    clamp_pid "$value" "$pid" || return 1
     printf '%s\n' "$pid"
+  done
+}
+
+clamp_pid() {
+  uclampset -a -R -m "$1" -p "$2" >/dev/null 2>&1 ||
+    uclampset -a -m "$1" -p "$2" >/dev/null 2>&1 ||
+    { log "uclampset refused $(comm_of "$2") ($2); this kernel may lack utilization clamping."; return 1; }
+}
+
+comm_of() {
+  local comm=""
+  read -r comm < "$PROC/$1/comm" 2>/dev/null
+  printf '%s\n' "${comm:-?}"
+}
+
+tracked_alive() {
+  local pid comm
+  [[ -n "$TRACKED" ]] || return 1
+  for pid in $TRACKED; do
+    comm=""
+    read -r comm < "$PROC/$pid/comm" 2>/dev/null || return 1
+    [[ " $COMPOSITORS " == *" $comm "* ]] || return 1
+  done
+  return 0
+}
+
+refresh_clamp() {
+  local pid now="" names=""
+  tracked_alive && return 0
+  for pid in $(compositor_pids); do
+    now+="${now:+ }$pid"
+    [[ " $TRACKED " != *" $pid "* ]] || continue
+    clamp_pid "$UCLAMP_MIN" "$pid" || continue
+    names+="${names:+, }$(comm_of "$pid") $pid"
+  done
+  if [[ -n "$names" ]]; then
+    log "$names: minimum CPU utilization $UCLAMP_MIN (kept on the fast cores)."
+  fi
+  TRACKED="$now"
+}
+
+check_gpu() {
+  local d cur="" max="" state first
+  if [[ -z "$GPU_DIR" ]]; then
+    gpu_dir >/dev/null || return 0
+    log "the GPU devfreq node appeared."
+    gpu_on
+    GPU_DIR="$(gpu_dir)"
+    return 0
+  fi
+  d="$GPU_DIR"
+  if [[ ! -f "$d/min_freq" ]]; then
+    log "$d disappeared (GPU driver reloaded?); waiting for it."
+    GPU_DIR=""
+    GPU_STATE=ok
+    return 0
+  fi
+  [[ -s "$SAVED" ]] || return 0
+  read -r cur < "$d/min_freq" 2>/dev/null
+  [[ "$cur" =~ ^[0-9]+$ ]] || return 0
+  read -r max < "$d/max_freq" 2>/dev/null
+  [[ "$max" =~ ^[0-9]+$ ]] || max=$GPU_HZ
+  if (( cur >= GPU_HZ )); then
+    state=ok
+  elif (( max < GPU_HZ )); then
+    state=hot
+  else
+    state=reset
+  fi
+  first=0
+  if [[ "$state" != "$GPU_STATE" ]]; then
+    first=1
+    case "$state" in
+      ok) [[ "$GPU_STATE" == hot ]] && log "GPU maximum is back to $max Hz; the $GPU_HZ Hz floor applies again." ;;
+      hot) log "GPU maximum lowered to $max Hz (temperature limit); the floor follows it until the GPU cools down." ;;
+      reset)
+        RESETS=$((RESETS + 1))
+        log "GPU minimum went back to $cur Hz by itself (reset $RESETS this boot); setting $GPU_HZ Hz again."
+        ;;
+    esac
+    GPU_STATE="$state"
+  fi
+  if [[ "$state" != reset ]]; then
+    return 0
+  fi
+  if (( first )); then
+    gpu_on || return 0
+  else
+    gpu_on >/dev/null || return 0
+  fi
+  read -r cur < "$d/min_freq" 2>/dev/null
+  if [[ "$cur" =~ ^[0-9]+$ ]] && (( cur >= GPU_HZ )); then
+    GPU_STATE=ok
+  fi
+  return 0
+}
+
+sleep_interval() {
+  read -r -t "$INTERVAL" -u "$SLEEP_FD" _ 2>/dev/null || true
+}
+
+run() {
+  TRACKED=""
+  GPU_DIR=""
+  RESETS=0
+  GPU_STATE=ok
+  exec {SLEEP_FD}<> <(:)
+  if gpu_dir >/dev/null; then
+    gpu_on
+    GPU_DIR="$(gpu_dir)"
+  else
+    log "no GPU devfreq node under $SYS/class/devfreq yet; checking again every ${INTERVAL}s."
+  fi
+  command -v uclampset >/dev/null 2>&1 || log "uclampset is missing (util-linux); the desktop is not boosted."
+  command -v pgrep >/dev/null 2>&1 || log "pgrep is missing (procps-ng); the desktop is not boosted."
+  while true; do
+    command -v uclampset >/dev/null 2>&1 && refresh_clamp
+    check_gpu
+    sleep_interval
   done
 }
 
@@ -81,20 +204,6 @@ apply() {
   gpu_on
   set_uclamp "$UCLAMP_MIN" >/dev/null
   return 0
-}
-
-run() {
-  local seen="" now
-  gpu_on
-  command -v uclampset >/dev/null 2>&1 || log "uclampset is missing (util-linux); Hyprland is not boosted."
-  while true; do
-    now="$(set_uclamp "$UCLAMP_MIN" | tr '\n' ' ')"
-    if [[ -n "$now" && "$now" != "$seen" ]]; then
-      log "Hyprland ($now) runs with a minimum CPU utilization of $UCLAMP_MIN, which keeps it on the fast cores."
-    fi
-    seen="$now"
-    sleep "$INTERVAL"
-  done
 }
 
 stop() {

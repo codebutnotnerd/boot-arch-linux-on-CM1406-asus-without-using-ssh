@@ -23,6 +23,8 @@ KERNEL_TMP_DIR=""
 RESUME=0
 RESUMING=0
 DESKTOP=1
+WM_ARG="${TARKIN_WM:-}"
+WM=""
 DRY_RUN=0
 RESUMABLE=0
 PASS_MIN=8
@@ -149,6 +151,7 @@ while [[ $# -gt 0 ]]; do
     --wifi-pass|-w) die "Do not pass Wi-Fi passwords on the command line; the installer prompts for it." ;;
     --resume)       RESUME=1; shift ;;
     --no-desktop)   DESKTOP=0; shift ;;
+    --wm)           WM_ARG="${2:?missing value for $1}"; shift 2 ;;
     --dry-run)      DRY_RUN=1; shift ;;
     -h|--help)
       cat <<'USAGE'
@@ -160,8 +163,10 @@ Options:
   --wifi-ssid, -s <ssid>          Wi-Fi network (WPA2-PSK); the passphrase is prompted. Default: the network
                                   saved in ChromeOS, if any.
   --keymap,  -k <layout>          Keyboard layout of the on-screen terminal (xkb name: fr, us, de, ...). Default: fr
-  --no-desktop                    Do not stage the first-boot setup (Hyprland, Mali GPU, sound); the stick
+  --no-desktop                    Do not stage the first-boot setup (Mali GPU, sound); the stick
                                   then boots to the terminal only.
+  --wm hyprland|niri              Optional: desktop the first boot sets up and starts (niri means niri +
+                                  Vitrum Plus). Default: none; after the first boot choose with tarkin-desktop.
   --resume                        Continue an interrupted install on the same stick (finished steps are skipped).
   --dry-run                       Run the checks and show the plan; download, write and change nothing.
 Environment:
@@ -174,6 +179,7 @@ Environment:
   ALLOW_UNSIGNED_MIRROR=1 accept a rootfs from a mirror other than archlinuxarm.org without a verifiable GPG signature
   FORCE_BOARD=1           skip the "this is a google,tarkin board" check
   TARKIN_STATE_DIR=D      where progress and the download are kept (default /var/tmp/tarkin-install)
+  TARKIN_WM=niri          same as --wm niri (or hyprland)
 USAGE
       exit 0 ;;
     -*) die "Unknown option: $1" ;;
@@ -203,6 +209,7 @@ name="$(basename "$DEV")"
   || die "$DEV is not identified as a USB device by sysfs (USB sticks and USB-connected SSDs are accepted; internal disks are not)."
 [[ "$(rootdev -s -d 2>/dev/null || true)" != "$DEV" ]] \
   || die "$DEV is the disk ChromeOS is running from."
+safe_why="$(tarkin_is_safe_usb_disk "$DEV" 2>&1)" || die "Refusing $DEV: $safe_why"
 
 for c in cgpt futility blockdev mkfs.ext4 bsdtar md5sum blkid dd findmnt mountpoint chroot crossystem curl unshare awk od; do
   command -v "$c" >/dev/null 2>&1 || die "Required command is missing: $c"
@@ -245,6 +252,16 @@ else
   KEYMAP="${KEYMAP_ARG:-fr}"
 fi
 [[ "$KEYMAP" =~ ^[a-z0-9_+-]{2,20}$ ]] || die "--keymap must be an xkb layout name such as fr or us."
+
+if (( RESUMING )) && [[ -z "$WM_ARG" ]]; then
+  WM="$(state_get WM)"
+fi
+WM="${WM_ARG:-${WM:-none}}"
+case "$WM" in
+  hyprland|niri|none) ;;
+  *) die "--wm must be hyprland or niri (got: $WM)." ;;
+esac
+(( DESKTOP )) || [[ "$WM" == none ]] || die "--wm $WM needs the desktop; it cannot be combined with --no-desktop."
 
 if (( RESUMING )); then
   echo "== Resuming the interrupted install on $DEV. Already done:"
@@ -600,12 +617,49 @@ if (( RESUMING )) && step_done password; then
   echo "== Password for alarm: set by the interrupted run, kept."
 fi
 
+busy_list() { tarkin_stick_blockers "$DEV" 2>/dev/null || true; }
+show_busy() { printf '%s\n' "$1" | cut -f2- | sed 's/^/      - /'; }
+stop_busy() {
+  {
+    echo "[-] $DEV is in use, so it was not $2. What uses it:"
+    show_busy "$1"
+    echo "    Close the programs listed, eject the stick in the Files app (or unplug it and plug it in again"
+    echo "    without opening the Files app), then run the same command again."
+    echo "    $3"
+  } >&2
+  exit 1
+}
+
+settle() {
+  udevadm settle --timeout=15 2>/dev/null || sleep 2
+}
+
+echo "== Checking that nothing uses $DEV..."
+for _ in 1 2 3; do
+  busy="$(busy_list)"
+  hard="$(printf '%s\n' "$busy" | grep -v -e '^mount-here' -e '^mount-other' -e '^$' || true)"
+  [[ -n "$hard" ]] || break
+  settle
+  sleep 2
+done
+mounted="$(printf '%s\n' "$busy" | grep -e '^mount-here' -e '^mount-other' || true)"
+if [[ -n "$hard" ]]; then
+  stop_busy "$hard" "touched" "Nothing was changed."
+fi
+if [[ -n "$mounted" ]]; then
+  echo "   Mounted now; unmounted before anything is written:"
+  show_busy "$mounted"
+else
+  echo "   Not mounted, not open, no swap, no device-mapper or RAID on it."
+fi
+
 if (( DRY_RUN )); then
   echo
   echo "== Plan for $DEV (dry run):"
   plan() { if (( RESUMING )) && step_done "$1"; then echo "   skip  $2 (done earlier)"; else echo "   do    $2"; fi; }
   echo "   do    re-sign the running ChromeOS kernel ($part_kern, $KVER) with the developer keys"
   echo "   do    turn USB boot on: $(tarkin_usb_boot_flags | head -n 1 || true)=1 dev_boot_signed_only=0 (now: $(tarkin_usb_boot_state 2>/dev/null || echo unknown))"
+  [[ -z "$mounted" ]] || echo "   do    unmount the partitions of $DEV listed above, and stop if one stays in use"
   plan partition "partition $DEV (ChromeOS GPT: p1 kernel, p2 root) - ERASES the stick"
   plan extract "format $part2 and extract the rootfs"
   echo "   do    copy the Tarkin files (rootfs/), fstab, keyboard layout $KEYMAP"
@@ -617,7 +671,12 @@ if (( DRY_RUN )); then
   [[ "${ALLOW_NO_PKGS:-0}" == 1 ]] && echo "   skip  packages (ALLOW_NO_PKGS=1)" || plan packages "install the terminal, Wi-Fi tools and sudo (pacman in a chroot)"
   plan password "set the password of alarm (asked before writing), lock root"
   if (( SKIP_WIFI )); then echo "   skip  Wi-Fi (done earlier)"; elif [[ -n "$WIFI_SSID" ]]; then echo "   do    Wi-Fi for the network '$WIFI_SSID'"; else echo "   skip  Wi-Fi (none configured)"; fi
-  if (( DESKTOP )); then echo "   do    stage the first-boot setup: Hyprland + Mali GPU + sound, as alarm, once the network is up"; else echo "   skip  first-boot desktop setup (--no-desktop)"; fi
+  if (( DESKTOP )); then echo "   do    stage the first-boot setup: Mali GPU + sound (and the Hyprland files), as alarm, once the network is up"; else echo "   skip  first-boot desktop setup (--no-desktop)"; fi
+  case "$WM" in
+    niri) echo "   do    then niri + Vitrum Plus (tarkin-desktop --niri), started at boot" ;;
+    hyprland) echo "   do    then start Hyprland at boot (base config)" ;;
+    *) (( ! DESKTOP )) || echo "   skip  no desktop at boot until one is chosen with tarkin-desktop" ;;
+  esac
   echo "   do    write and verify the signed kernel on $part1"
   echo "== Dry run finished; nothing was changed."
   RESUMABLE=0
@@ -648,6 +707,7 @@ if (( ! RESUMING )); then
   state_del "${STICK_STEPS[@]}"
 fi
 state_set KEYMAP "$KEYMAP"
+state_set WM "$WM"
 save_sysctl
 throttle_writeback
 
@@ -670,14 +730,48 @@ unmount_all() {
     [[ -b "$p" ]] || continue
     for _ in 1 2 3; do
       findmnt -rn -S "$p" >/dev/null 2>&1 || break
-      umount "$p" 2>/dev/null || umount -l "$p" 2>/dev/null || sleep 1
+      umount "$p" 2>/dev/null \
+        || { command -v udisksctl >/dev/null 2>&1 && udisksctl unmount -b "$p" >/dev/null 2>&1; } \
+        || sleep 1
     done
-    ! findmnt -rn -S "$p" >/dev/null 2>&1 \
-      || die "Cannot unmount $p. Eject the stick in the Files app (or close what uses it) and run again."
   done
+  return 0
+}
+release_stick() {
+  local b="" _
+  for _ in 1 2 3 4 5; do
+    unmount_all
+    settle
+    b="$(busy_list)"
+    [[ -n "$b" ]] || return 0
+    sleep 2
+  done
+  stop_busy "$b" "$1" "$2"
+}
+reread_table() {
+  sync
+  blockdev --flushbufs "$DEV" 2>/dev/null || true
+  if command -v partx >/dev/null 2>&1 && partx -u "$DEV" 2>/dev/null; then
+    :
+  elif command -v partprobe >/dev/null 2>&1 && partprobe "$DEV" 2>/dev/null; then
+    :
+  else
+    blockdev --rereadpt "$DEV" 2>/dev/null || true
+  fi
+  settle
+}
+wipe_old_signatures() {
+  local name start p
+  name="$(basename "$DEV")"
+  for p in "$TARKIN_SYS/block/$name/$name"*; do
+    start="$(cat "$p/start" 2>/dev/null || true)"
+    [[ "$start" =~ ^[0-9]+$ ]] || continue
+    dd if=/dev/zero of="$DEV" bs=512 seek="$start" count=8192 conv=notrunc,fsync status=none 2>/dev/null || true
+  done
+  dd if=/dev/zero of="$DEV" bs=512 seek=139264 count=8192 conv=notrunc,fsync status=none
 }
 echo "== Unmounting existing partitions on $DEV..."
-unmount_all
+release_stick "partitioned or formatted" "Nothing was written to it."
 
 if (( RESUMING )) && step_done partition; then
   echo "== [resume] Partition table of $DEV already written; kept."
@@ -687,6 +781,7 @@ else
   state_del "${FS_STEPS[@]}" STEP_partition STICK_PARTUUID
   total_sectors="$(blockdev --getsz "$DEV")"
   (( total_sectors > 139264 + 4 * 2097152 )) || die "USB device is too small (the system needs about 4 GiB on the stick; 8 GiB or more is recommended, 16 GiB comfortable)."
+  wipe_old_signatures
   cgpt create "$DEV"
   cgpt boot -p "$DEV"
   cgpt add -i 1 -t kernel -b 8192 -s 131072 -l KERN-A -S 1 -T 1 -P 15 "$DEV"
@@ -694,8 +789,7 @@ else
   expected2=$((total_sectors - 139264 - 2048))
   size2=0
   for _ in 1 2 3 4 5; do
-    blockdev --rereadpt "$DEV" 2>/dev/null || true
-    udevadm settle 2>/dev/null || sleep 2
+    reread_table
     size2="$(blockdev --getsz "$part2" 2>/dev/null || echo 0)"
     (( size2 >= expected2 - 4096 )) && break
     unmount_all
@@ -703,6 +797,10 @@ else
   done
   cgpt show "$DEV"
   [[ -b "$part1" && -b "$part2" ]] || die "Partition device nodes did not appear for $DEV."
+  if (( size2 < expected2 - 4096 )); then
+    busy="$(busy_list)"
+    [[ -z "$busy" ]] || stop_busy "$busy" "formatted" "The kernel still sees the OLD partition table because of this."
+  fi
   (( size2 >= expected2 - 4096 )) \
     || die "The kernel still sees the OLD partition table ($part2 is $size2 sectors, expected about $expected2). Nothing was written to it. Unplug the stick, plug it in again WITHOUT opening the Files app, then run the installer again."
   state_set STICK_PARTUUID "$(cgpt show -i 2 -u "$DEV" | tr '[:upper:]' '[:lower:]')"
@@ -714,7 +812,7 @@ STICK_MARK_DIR="$MNT/var/lib/tarkin"
 STICK_MARK="$STICK_MARK_DIR/install-extracted"
 if (( RESUMING )) && step_done extract; then
   echo "== [resume] Root filesystem already extracted; mounting it."
-  unmount_all
+  release_stick "mounted" "The extracted files on it are kept."
   mkdir -p "$MNT"
   mount "$part2" "$MNT"
   [[ -f "$STICK_MARK" ]] \
@@ -722,8 +820,13 @@ if (( RESUMING )) && step_done extract; then
 else
   echo "== Formatting $part2 as ext4 (label ALARM)..."
   state_del "${FS_STEPS[@]}"
-  unmount_all
-  mkfs.ext4 -F -L ALARM "$part2"
+  release_stick "formatted" "The partition table is written; run the same command again to resume."
+  if ! mkfs.ext4 -F -L ALARM "$part2"; then
+    echo "[!] mkfs.ext4 refused $part2; checking again what holds it..." >&2
+    release_stick "formatted" "The partition table is written; run the same command again to resume."
+    mkfs.ext4 -F -L ALARM "$part2" \
+      || die "mkfs.ext4 still refuses $part2 and no program, mount, swap or device-mapper was found on it. Unplug the stick, plug it in again without opening the Files app, then run the same command again."
+  fi
   mkdir -p "$MNT"
   mount "$part2" "$MNT"
   avail_kb="$(df -Pk "$MNT" | awk 'NR==2 {print $4}')"
@@ -758,8 +861,12 @@ install -m 755 "$REPO_ROOT/scripts/install-desktop.sh" "$MNT/home/alarm/install-
 install -m 755 "$REPO_ROOT/install-hyprland.sh" "$MNT/home/alarm/install-hyprland.sh"
 install -m 755 "$REPO_ROOT/install-xfce.sh" "$MNT/home/alarm/install-xfce.sh"
 install -m 755 "$REPO_ROOT/install-gpuapp.sh" "$MNT/home/alarm/install-gpuapp.sh"
+install -m 755 "$REPO_ROOT/install-niri.sh" "$MNT/home/alarm/install-niri.sh"
 install -m 755 "$REPO_ROOT/scripts/upgrade-stick.sh" "$MNT/home/alarm/upgrade-stick.sh"
-chown "$ALARM_UID:$ALARM_GID" "$MNT/home/alarm/install-desktop.sh" "$MNT/home/alarm/install-hyprland.sh" "$MNT/home/alarm/upgrade-stick.sh" "$MNT/home/alarm/install-xfce.sh" "$MNT/home/alarm/install-gpuapp.sh"
+install -m 755 "$REPO_ROOT/scripts/install-vitrum-plus-niri-v10.sh" "$MNT/home/alarm/install-vitrum-plus-niri-v10.sh"
+install -D -m 755 "$REPO_ROOT/choose-desktop.sh" "$MNT/usr/local/bin/tarkin-desktop"
+chown 0:0 "$MNT/usr/local/bin/tarkin-desktop"
+chown "$ALARM_UID:$ALARM_GID" "$MNT/home/alarm/install-desktop.sh" "$MNT/home/alarm/install-hyprland.sh" "$MNT/home/alarm/upgrade-stick.sh" "$MNT/home/alarm/install-xfce.sh" "$MNT/home/alarm/install-gpuapp.sh" "$MNT/home/alarm/install-niri.sh" "$MNT/home/alarm/install-vitrum-plus-niri-v10.sh"
 BASHRC="$MNT/home/alarm/.bashrc"
 if [[ ! -f "$BASHRC" && -f "$MNT/etc/skel/.bashrc" ]]; then
   cp "$MNT/etc/skel/.bashrc" "$BASHRC"
@@ -937,11 +1044,18 @@ if (( DESKTOP )) && (( PKG_OK )) && [[ "${ALLOW_NO_PKGS:-0}" != 1 ]]; then
     date -u +%FT%TZ > "$MNT/var/lib/tarkin/firstboot.pending"
     rm -f "$MNT/var/lib/tarkin/firstboot.failed" "$MNT/var/lib/tarkin/firstboot.attempts" "$MNT/var/lib/tarkin/firstboot.reason"
     enable_unit /etc/systemd/system/tarkin-firstboot.service "$WANTS"
-    echo "== First-boot setup staged: Hyprland, the Mali GPU stack and sound are installed at the first boot."
+    echo "== First-boot setup staged: the Mali GPU stack and sound are installed at the first boot."
+  fi
+  if [[ "$WM" != none ]]; then
+    printf 'FIRSTBOOT_WM=%s\n' "$WM" > "$MNT/etc/tarkin/firstboot.conf"
+    chmod 644 "$MNT/etc/tarkin/firstboot.conf"
+    echo "== $WM chosen: set up at the first boot, then started at boot (other choice later: tarkin-desktop)."
+  elif [[ "$(cat "$MNT/etc/tarkin/firstboot.conf" 2>/dev/null)" =~ ^FIRSTBOOT_WM=(niri|hyprland)$ ]]; then
+    rm -f "$MNT/etc/tarkin/firstboot.conf"
   fi
 else
   rm -f "$MNT/var/lib/tarkin/firstboot.pending" "$WANTS/tarkin-firstboot.service"
-  (( DESKTOP )) && echo "[!] First-boot setup NOT staged (packages missing). After booting: bash ~/install-hyprland.sh" >&2
+  (( DESKTOP )) && echo "[!] First-boot setup NOT staged (packages missing). After booting: tarkin-desktop" >&2
 fi
 sync
 
@@ -975,12 +1089,20 @@ WARN
 fi
 mark_done complete
 RESUMABLE=0
-if (( DESKTOP )) && [[ -f "$MNT/var/lib/tarkin/firstboot.pending" ]]; then
-  FIRSTBOOT_TEXT="    Then, by itself (needs Wi-Fi, 20 to 60 minutes): Hyprland, the Mali GPU stack and sound are
+if (( DESKTOP )) && [[ -f "$MNT/var/lib/tarkin/firstboot.pending" && "$WM" == niri ]]; then
+  FIRSTBOOT_TEXT="    Then, by itself (needs Wi-Fi, 20 to 60 minutes): the Mali GPU stack, sound, niri and Vitrum Plus
+    are installed (progress: tail -f /var/log/tarkin-firstboot.log), then the machine restarts once into
+    niri. Do not power off while it works. Other desktop later: tarkin-desktop"
+elif (( DESKTOP )) && [[ -f "$MNT/var/lib/tarkin/firstboot.pending" && "$WM" == hyprland ]]; then
+  FIRSTBOOT_TEXT="    Then, by itself (needs Wi-Fi, 20 to 60 minutes): the Mali GPU stack, sound and Hyprland are
     installed (progress: tail -f /var/log/tarkin-firstboot.log), then the machine restarts once into
-    Hyprland. Do not power off while it works."
+    Hyprland. Do not power off while it works. Other desktop later: tarkin-desktop"
+elif (( DESKTOP )) && [[ -f "$MNT/var/lib/tarkin/firstboot.pending" ]]; then
+  FIRSTBOOT_TEXT="    Then, by itself (needs Wi-Fi, 20 to 60 minutes): the Mali GPU stack and sound are installed
+    (progress: tail -f /var/log/tarkin-firstboot.log), then the machine restarts once into the terminal.
+    Do not power off while it works. Then choose the desktop: tarkin-desktop (niri + Vitrum Plus, or Hyprland)"
 else
-  FIRSTBOOT_TEXT="    Optional GPU desktop (Wi-Fi first): bash ~/install-hyprland.sh"
+  FIRSTBOOT_TEXT="    Optional GPU desktop (Wi-Fi first): tarkin-desktop"
 fi
 cat <<EOF
 ==========================================================

@@ -30,3 +30,8 @@ on a device you own or are allowed to modify, and at your own risk.
 Third-party components (Arch Linux ARM, the Linux kernel, cage, foot, seatd,
 wpa_supplicant, ChromeOS vboot tools, firmware blobs, etc.) are not covered by
 this license and remain under their own respective licenses.
+
+scripts/install-vitrum-plus-niri-v10.sh contains widgets adapted from
+MacShell-niri (https://github.com/frithTK/MacShell-niri, MIT, Copyright (c)
+2026 Rickky) and the Open Runde font (https://github.com/lauridskern/open-runde,
+SIL Open Font License 1.1). They keep their own licenses.
