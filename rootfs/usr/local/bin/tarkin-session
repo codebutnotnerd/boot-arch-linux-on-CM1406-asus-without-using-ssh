@@ -1,9 +1,0 @@
-#!/bin/bash
-set -euo pipefail
-case "${1:-}" in desktop|terminal) ;; *) echo "Usage: sudo tarkin-session desktop|terminal" >&2; exit 1 ;; esac
-[[ $EUID -eq 0 ]] || { echo "Run it with sudo." >&2; exit 1; }
-if [[ -x /usr/local/bin/tarkin-display ]]; then
-  case "$1" in desktop) exec /usr/local/bin/tarkin-display hyprland ;; terminal) exec /usr/local/bin/tarkin-display terminal ;; esac
-fi
-echo "tarkin-display is missing. Reinstall the v1.40 rootfs tools before changing display ownership." >&2
-exit 1

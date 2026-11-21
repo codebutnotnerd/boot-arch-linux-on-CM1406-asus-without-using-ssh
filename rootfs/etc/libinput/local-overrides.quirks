@@ -1,4 +1,0 @@
-[Touchpad pressure CM1406]
-MatchUdevType=touchpad
-MatchName=*04F3:31C6*
-AttrPressureRange=15:10
