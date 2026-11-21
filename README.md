@@ -43,13 +43,13 @@ under niri and the 4-image Vulkan layer built by `install-gpuapp.sh`. The tests 
 
    ```sh
    cd /var/tmp
-   bsdtar -xf ~/MyFiles/Downloads/<zip-name>.zip
+   bsdtar -xf ~/MyFiles/Downloads/boot-arch-linux-on-CM1406-v1.60.zip
    ```
 
-3. Plug in the stick. Go to VT2 (`Ctrl+Alt+Refresh`), log in as `chronos` and run:
+3. Plug in the stick. Go to VT2 Shell (`Ctrl+Alt+Refresh`), log in as `root` and run:
 
    ```sh
-   cd /var/tmp/<unpacked-folder>
+   cd /var/tmp/boot-arch-linux-on-CM1406-v1.60
    sudo bash install.sh
    ```
 
@@ -57,7 +57,7 @@ under niri and the 4-image Vulkan layer built by `install-gpuapp.sh`. The tests 
    before erasing it, then asks for a password for the user `alarm`. If it stops, run the same command again
    and it carries on.
 
-4. Reboot with the stick in. At "OS verification is OFF" press `Ctrl+U`.
+4. Reboot with the stick in. At "Your in devmode" press `Ctrl+U`.
 
 5. First boot: a terminal appears. The stick installs the GPU stack and sound on its own (20 to 60 minutes,
    Wi-Fi needed, don't power off). Watch it with `tail -f /var/log/tarkin-firstboot.log`. No Wi-Fi?
