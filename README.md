@@ -34,7 +34,7 @@ under niri and the 4-image Vulkan layer built by `install-gpuapp.sh`. The tests 
 - The Chromebook in Developer Mode
 - A USB stick or USB SSD of 8 GB or more. It will be erased.
 - Wi-Fi (a phone hotspot works)
-- And a brain and electricity (optionnal)
+- A brain and electricity (optionnal)
 
 ## Install
 
