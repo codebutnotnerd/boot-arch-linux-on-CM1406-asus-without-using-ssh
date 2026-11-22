@@ -44,13 +44,13 @@ under niri and the 4-image Vulkan layer built by `install-gpuapp.sh`. The tests 
 
    ```sh
    cd /var/tmp
-   bsdtar -xf ~/MyFiles/Downloads/boot-arch-linux-on-CM1406-v1.60.zip
+   bsdtar -xf ~/MyFiles/Downloads/"zip name"
    ```
 
 3. Plug in the stick. Go to VT2 Shell (`Ctrl+Alt+Refresh`), log in as `root` and run:
 
    ```sh
-   cd /var/tmp/boot-arch-linux-on-CM1406-v1.60
+   cd /var/tmp/"zip name"
    sudo bash install.sh
    ```
 
