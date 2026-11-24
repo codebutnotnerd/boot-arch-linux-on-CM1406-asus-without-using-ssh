@@ -5,7 +5,7 @@ the Chromebook. ChromeOS stays on the internal disk, untouched: unplug the stick
 
 Version 1.60. More detail in [docs/REFERENCE.md](docs/REFERENCE.md), history in [CHANGELOG.md](CHANGELOG.md).
 
-Only the CM1406 is supported (board `google,tarkin`, MediaTek MT8189, Mali-G57 GPU). The installer checks the
+Only the CM1406 is supported (board `skywalker (tarkin)`, MediaTek MT8189, Mali-G57 GPU). The installer checks the
 board and stops on anything else.
 
 ## What works and what doesn't
